@@ -1,14 +1,12 @@
-import React from "react";
+import type { ReactNode } from "react";
 
-export default function Card({
-    title,
-    children,
-    actions,
-}: {
+type CardProps = {
     title: string;
-    children: React.ReactNode;
-    actions?: React.ReactNode;
-}) {
+    children: ReactNode;
+    actions?: ReactNode;
+};
+
+export default function Card({ title, children, actions }: CardProps) {
     return (
         <div className="bg-white rounded-2xl shadow-sm border p-4">
             <div className="flex items-center justify-between mb-3">
