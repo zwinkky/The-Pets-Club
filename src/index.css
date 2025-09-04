@@ -1,0 +1,18 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+
+    html,
+    body,
+    #root {
+        height: 100%;
+    }
+
+    /* Use the color defined in tailwind.config.js -> theme.extend.colors.appbg */
+    body {
+        background-color: theme('colors.appbg');
+        @apply text-gray-900 antialiased;
+    }
+}
