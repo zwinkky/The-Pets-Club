@@ -80,22 +80,30 @@ export default function OrderEditor({
                 }
             }
 
+            // Build LOCAL arrays (strings for IDs) — we'll reconcile with these
             const prodMap = new Map<string, Product>();
             const varList: VariantOption[] = [];
             for (const r of catRows) {
-                if (!prodMap.has(r.product_id)) {
-                    prodMap.set(r.product_id, { id: r.product_id, name: r.product_name } as Product);
+                const pid = String(r.product_id);
+                const vid = String(r.variant_id);
+
+                if (!prodMap.has(pid)) {
+                    prodMap.set(pid, { id: pid, name: r.product_name } as Product);
                 }
                 varList.push({
-                    id: r.variant_id,
-                    product_id: r.product_id,
+                    id: vid,
+                    product_id: pid,
                     name: r.variant_name,
                     wholesale_price: isAdmin ? (r.wholesale_price ?? null) : null,
                     retail_price_default: r.retail_price ?? null,
                 });
             }
-            setProducts(Array.from(prodMap.values()).sort((a, b) => a.name.localeCompare(b.name)));
-            setVariants(varList);
+            const prods = Array.from(prodMap.values()).sort((a, b) => a.name.localeCompare(b.name));
+            const vars = varList;
+
+            // Push to state for rendering
+            setProducts(prods);
+            setVariants(vars);
 
             // 2) Load order if editing
             if (!orderId) {
@@ -150,21 +158,24 @@ export default function OrderEditor({
                 }
             }
 
-            // Map item names to ids when present in catalog
+            // 3) Reconcile using the freshly fetched LOCAL catalog (not stale state)
             const reconciled: Item[] = rows.map((it: any) => {
-                const prod = products.find((pp) => pp.name === it.product_name);
-                const vlist = prod ? variants.filter((vv) => vv.product_id === prod.id) : [];
+                const prod =
+                    prods.find((pp) => pp.name === it.product_name) || // usual path (matching by name)
+                    undefined;
+
+                const vlist = prod ? vars.filter((vv) => vv.product_id === String(prod.id)) : [];
                 const varMatch = vlist.find((vv) => vv.name === it.variation);
 
                 return {
-                    row_id: it.id,
+                    row_id: String(it.id),
                     product_name: it.product_name,
                     variation: it.variation,
                     qty: Number(it.qty) || 0,
                     wholesale_price: isAdmin ? Number(it.wholesale_price) || 0 : undefined,
                     retail_price: Number(it.retail_price) || 0,
-                    product_id: prod?.id,
-                    variant_id: varMatch?.id,
+                    product_id: prod ? String(prod.id) : undefined,
+                    variant_id: varMatch ? String(varMatch.id) : undefined,
                 };
             });
 
@@ -197,9 +208,9 @@ export default function OrderEditor({
 
     // selects
     const onSelectProduct = (idx: number, product_id: string) => {
-        const prod = products.find((p) => p.id === product_id);
+        const prod = products.find((p) => String(p.id) === String(product_id));
         updateItem(idx, {
-            product_id,
+            product_id: product_id ? String(product_id) : undefined,
             product_name: prod?.name || "",
             variant_id: undefined,
             variation: "",
@@ -209,10 +220,10 @@ export default function OrderEditor({
     };
 
     const onSelectVariant = (idx: number, variant_id: string) => {
-        const v = variants.find((x) => x.id === variant_id);
+        const v = variants.find((x) => String(x.id) === String(variant_id));
         if (!v) return;
         updateItem(idx, {
-            variant_id,
+            variant_id: String(variant_id),
             variation: v.name,
             wholesale_price: isAdmin ? Number(v.wholesale_price ?? 0) : undefined,
             retail_price: Number(v.retail_price_default ?? 0),
@@ -354,7 +365,7 @@ export default function OrderEditor({
                                             >
                                                 <option value="">Select product…</option>
                                                 {products.map((p) => (
-                                                    <option key={p.id} value={p.id}>{p.name}</option>
+                                                    <option key={String(p.id)} value={String(p.id)}>{p.name}</option>
                                                 ))}
                                             </select>
                                         </td>
@@ -367,7 +378,7 @@ export default function OrderEditor({
                                             >
                                                 <option value="">{it.product_id ? "Select variant…" : "Pick a product first"}</option>
                                                 {opts.map((v) => (
-                                                    <option key={v.id} value={v.id}>{v.name}</option>
+                                                    <option key={String(v.id)} value={String(v.id)}>{v.name}</option>
                                                 ))}
                                             </select>
                                         </td>
