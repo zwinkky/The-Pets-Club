@@ -8,22 +8,24 @@ type OrderTotalsRow = {
     order_id: string;
     order_code: string;
     client_id: string;
-    wholesale_total: string;
+    wholesale_total?: string; // optional for editor rows
     retail_total: string;
     shop_fees: string;
     order_income: string;
-    client_profit: string;
+    client_profit?: string; // optional for editor rows
 };
 
 type OrderDateMap = Record<string, string>; // order_id -> YYYY-MM-DD
 
 export default function ClientPage({
+    isAdmin,
     clientId,
     onBack,
     onNewOrder,
     onOpenOrder,
     onOpenProducts,
 }: {
+    isAdmin: boolean;
     clientId: string;
     onBack: () => void;
     onNewOrder: (clientId: string) => void;
@@ -55,13 +57,18 @@ export default function ClientPage({
         setClient(c as Client);
 
         // order totals
-        const { data: o, error: e2 } = await supabase
-            .from("order_totals")
-            .select("*")
+        const orderTotalsQuery = supabase.from("order_totals").select(
+            isAdmin
+                ? "*"
+                : // Editors: request only non-sensitive columns
+                "order_id, order_code, client_id, retail_total, shop_fees, order_income"
+        );
+        const { data: o, error: e2 } = await orderTotalsQuery
             .eq("client_id", clientId)
             .order("order_code", { ascending: false });
+
         if (e2) alert(e2.message);
-        setOrders((o || []) as any);
+        setOrders(((o || []) as unknown) as OrderTotalsRow[]);
 
         // order dates
         const { data: od, error: e3 } = await supabase
@@ -80,12 +87,16 @@ export default function ClientPage({
 
     useEffect(() => {
         load();
-    }, [clientId]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [clientId, isAdmin]); // reload if role changes while user is here
 
     useEffect(() => {
         // Check role: admin OR editor can delete orders
         (async () => {
-            const [adm, edt] = await Promise.all([supabase.rpc("is_admin"), supabase.rpc("is_editor")]);
+            const [adm, edt] = await Promise.all([
+                supabase.rpc("is_admin"),
+                supabase.rpc("is_editor"),
+            ]);
             setCanDeleteOrders(Boolean(adm.data) || Boolean(edt.data));
         })();
     }, []);
@@ -134,9 +145,14 @@ export default function ClientPage({
                     </div>
                 </div>
                 <div className="flex gap-2">
-                    <button className="bg-white border rounded-lg px-4 py-2" onClick={onOpenProducts}>
-                        Product List
-                    </button>
+                    {isAdmin && (
+                        <button
+                            className="bg-white border rounded-lg px-4 py-2"
+                            onClick={onOpenProducts}
+                        >
+                            Product List
+                        </button>
+                    )}
                     <button
                         className="bg-black text-white rounded-lg px-4 py-2"
                         onClick={() => onNewOrder(client.id)}
@@ -150,13 +166,19 @@ export default function ClientPage({
             <Card title="Totals">
                 {loading ? (
                     <div className="text-sm text-gray-600">Calculating…</div>
-                ) : (
+                ) : isAdmin ? (
                     <div className="grid gap-3 md:grid-cols-5">
                         <SummaryBox label="Wholesale Total" value={totals.w} />
                         <SummaryBox label="Retail Total" value={totals.r} />
                         <SummaryBox label="Shop Fees" value={totals.f} />
                         <SummaryBox label="Order Income" value={totals.inc} />
                         <SummaryBox label="Client Profit" value={totals.prof} />
+                    </div>
+                ) : (
+                    <div className="grid gap-3 md:grid-cols-3">
+                        <SummaryBox label="Retail Total" value={totals.r} />
+                        <SummaryBox label="Shop Fees" value={totals.f} />
+                        <SummaryBox label="Order Income" value={totals.inc} />
                     </div>
                 )}
             </Card>
@@ -174,11 +196,11 @@ export default function ClientPage({
                                 <tr>
                                     <th className="p-2 text-left">Order Date</th>
                                     <th className="p-2 text-left">Order ID</th>
-                                    <th className="p-2 text-right">Wholesale Total</th>
+                                    {isAdmin && <th className="p-2 text-right">Wholesale Total</th>}
                                     <th className="p-2 text-right">Retail Total</th>
                                     <th className="p-2 text-right">Shop Fees</th>
                                     <th className="p-2 text-right">Order Income</th>
-                                    <th className="p-2 text-right">Client Profit</th>
+                                    {isAdmin && <th className="p-2 text-right">Client Profit</th>}
                                     <th className="p-2"></th>
                                 </tr>
                             </thead>
@@ -191,11 +213,19 @@ export default function ClientPage({
                                                 {date ? new Date(date).toLocaleDateString() : "—"}
                                             </td>
                                             <td className="p-2">{o.order_code}</td>
-                                            <td className="p-2 text-right">₱{fmt(Number(o.wholesale_total))}</td>
+                                            {isAdmin && (
+                                                <td className="p-2 text-right">
+                                                    ₱{fmt(Number(o.wholesale_total))}
+                                                </td>
+                                            )}
                                             <td className="p-2 text-right">₱{fmt(Number(o.retail_total))}</td>
                                             <td className="p-2 text-right">₱{fmt(Number(o.shop_fees))}</td>
                                             <td className="p-2 text-right">₱{fmt(Number(o.order_income))}</td>
-                                            <td className="p-2 text-right">₱{fmt(Number(o.client_profit))}</td>
+                                            {isAdmin && (
+                                                <td className="p-2 text-right">
+                                                    ₱{fmt(Number(o.client_profit))}
+                                                </td>
+                                            )}
                                             <td className="p-2 text-right">
                                                 <button
                                                     className="underline"

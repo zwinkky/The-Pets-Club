@@ -5,12 +5,17 @@ import { fmt } from "../lib/utils";
 import type { Product, ProductVariant } from "../lib/types";
 
 type Item = {
+    // db identity for existing rows
+    row_id?: string;
+
+    // business fields
     product_name: string;
     variation: string;
     qty: number;
-    wholesale_price: number;
+    wholesale_price?: number; // admin-only
     retail_price: number;
-    // local helper fields for the selects (not stored in DB)
+
+    // local helper fields for selects
     product_id?: string;
     variant_id?: string;
 };
@@ -18,10 +23,12 @@ type Item = {
 const today = () => new Date().toISOString().slice(0, 10); // YYYY-MM-DD
 
 export default function OrderEditor({
+    isAdmin,
     orderId,
     clientId,
     onCancel,
 }: {
+    isAdmin: boolean;
     orderId?: string;
     clientId: string;
     onCancel: (clientId: string) => void;
@@ -29,95 +36,225 @@ export default function OrderEditor({
     const [orderCode, setOrderCode] = useState("");
     const [orderDate, setOrderDate] = useState<string>(today());
     const [shopFees, setShopFees] = useState<number>(0);
-    const [items, setItems] = useState<Item[]>([{ product_name: "", variation: "", qty: 1, wholesale_price: 0, retail_price: 0 }]);
+    const [items, setItems] = useState<Item[]>([
+        { product_name: "", variation: "", qty: 1, wholesale_price: isAdmin ? 0 : undefined, retail_price: 0 },
+    ]);
     const [saving, setSaving] = useState(false);
     const [loading, setLoading] = useState(true);
 
-    // products/variants for dropdowns
+    // track original row ids to delete removed items safely
+    const [originalItemIds, setOriginalItemIds] = useState<string[]>([]);
+
+    // client-scoped products/variants for dropdowns
     const [products, setProducts] = useState<Product[]>([]);
     const [variants, setVariants] = useState<ProductVariant[]>([]);
     const variantsByProduct = useMemo(
-        () => variants.reduce<Record<string, ProductVariant[]>>((acc, v) => { (acc[v.product_id] ||= []).push(v); return acc; }, {}),
+        () =>
+            variants.reduce<Record<string, ProductVariant[]>>((acc, v) => {
+                (acc[v.product_id] ||= []).push(v);
+                return acc;
+            }, {}),
         [variants]
     );
 
     useEffect(() => {
         (async () => {
-            // load catalog
-            const [{ data: p }, { data: v }] = await Promise.all([
-                supabase.from("products").select("id,name").order("name"),
-                supabase.from("product_variants").select("id,product_id,name,wholesale_price,retail_price_default").order("name"),
-            ]);
-            setProducts(p || []);
-            setVariants(v || []);
+            setLoading(true);
 
-            // load order if editing
+            // -------- 1) Load client-scoped catalog --------
+            // Admin gets wholesale+retail; Editor gets retail only
+            let catRows: any[] = [];
+            if (isAdmin) {
+                const { data, error } = await supabase.rpc("client_catalog_for_admin", {
+                    p_client_id: clientId,
+                });
+                if (error) alert(error.message);
+                catRows = (data || []) as any[];
+            } else {
+                // Prefer editor RPC; if missing, fall back to admin RPC and just ignore wholesale locally
+                const editor = await supabase.rpc("client_catalog_for_editor", { p_client_id: clientId });
+                if (editor.error) {
+                    const admin = await supabase.rpc("client_catalog_for_admin", { p_client_id: clientId });
+                    if (admin.error) alert(admin.error.message);
+                    catRows = (admin.data || []) as any[];
+                } else {
+                    catRows = (editor.data || []) as any[];
+                }
+            }
+
+            // Build products & variants arrays from the client catalog
+            const prodMap = new Map<string, Product>();
+            const varList: ProductVariant[] = [];
+            for (const r of catRows) {
+                // r.product_id, r.product_name, r.variant_id, r.variant_name, r.wholesale_price?, r.retail_price
+                if (!prodMap.has(r.product_id)) {
+                    prodMap.set(r.product_id, { id: r.product_id, name: r.product_name } as Product);
+                }
+                varList.push({
+                    id: r.variant_id,
+                    product_id: r.product_id,
+                    name: r.variant_name,
+                    wholesale_price: isAdmin ? r.wholesale_price : undefined,
+                    retail_price_default: r.retail_price,
+                } as ProductVariant);
+            }
+            setProducts(Array.from(prodMap.values()).sort((a, b) => a.name.localeCompare(b.name)));
+            setVariants(varList);
+
+            // -------- 2) Load order header + items (if editing) --------
             if (!orderId) {
                 setOrderCode(Date.now().toString());
                 setOrderDate(today());
+                setOriginalItemIds([]);
                 setLoading(false);
                 return;
             }
-            const { data: order, error: e1 } = await supabase.from("orders").select("*").eq("id", orderId).single();
-            if (e1) { alert(e1.message); setLoading(false); return; }
+
+            const { data: order, error: e1 } = await supabase
+                .from("orders")
+                .select("*")
+                .eq("id", orderId)
+                .single();
+            if (e1) {
+                alert(e1.message);
+                setLoading(false);
+                return;
+            }
             setOrderCode(order.order_code);
             setOrderDate(order.order_date || today());
             setShopFees(Number(order.shop_fees));
 
-            const { data: its, error: e2 } = await supabase
-                .from("order_items")
-                .select("product_name,variation,qty,wholesale_price,retail_price")
-                .eq("order_id", orderId)
-                .order("id");
-            if (e2) alert(e2.message);
+            // Read items securely (admins read wholesale; editors use RPC)
+            let rows: any[] = [];
+            if (isAdmin) {
+                const { data: its, error: e2 } = await supabase
+                    .from("order_items")
+                    .select("id,product_name,variation,qty,wholesale_price,retail_price")
+                    .eq("order_id", orderId)
+                    .order("id");
+                if (e2) alert(e2.message);
+                rows = its || [];
+            } else {
+                const rpc = await supabase.rpc("order_items_for_editor", { p_order_id: orderId });
+                if (rpc.error) {
+                    const { data: its, error: e2 } = await supabase
+                        .from("order_items")
+                        .select("id,product_name,variation,qty,retail_price")
+                        .eq("order_id", orderId)
+                        .order("id");
+                    if (e2) alert(e2.message);
+                    rows = its || [];
+                } else {
+                    rows = (rpc.data || []).map((r: any) => ({
+                        id: r.id,
+                        product_name: r.product_name,
+                        variation: r.variation,
+                        qty: Number(r.quantity) || 0,
+                        retail_price: Number(r.retail_price) || 0,
+                    }));
+                }
+            }
 
-            const reconciled = (its || []).map((it: any) => {
-                // try to map names back to ids (best-effort)
-                const prod = (p || []).find((pp) => pp.name === it.product_name);
-                const vlist = prod ? (v || []).filter((vv) => vv.product_id === prod.id) : [];
-                const varMatch = vlist.find(vv => vv.name === it.variation);
+            // Ensure any existing item’s product/variant is available in dropdowns
+            const ensureInCatalog = (prodName: string, varName: string) => {
+                let prod = products.find((pp) => pp.name === prodName);
+                if (!prod) {
+                    // create a synthetic product entry
+                    const pid = `synthetic-${prodName}`;
+                    prod = { id: pid, name: prodName } as Product;
+                    setProducts((prev) => [...prev, prod!]);
+                }
+                let v = variants.find((vv) => vv.product_id === prod!.id && vv.name === varName);
+                if (!v) {
+                    const vid = `synthetic-${prod!.id}-${varName}`;
+                    setVariants((prev) => [
+                        ...prev,
+                        {
+                            id: vid,
+                            product_id: prod!.id,
+                            name: varName,
+                            // prices remain undefined; they won’t be used unless admin edits
+                            wholesale_price: undefined,
+                            retail_price_default: 0,
+                        } as ProductVariant,
+                    ]);
+                }
+            };
+
+            // Reconcile items; map by names to ids within the client catalog
+            const reconciled: Item[] = rows.map((it: any) => {
+                let prod = (prodMap.get as any) ? undefined : undefined; // TS quiet
+                prod = products.find((pp) => pp.name === it.product_name);
+                if (!prod) ensureInCatalog(it.product_name, it.variation);
+                const prod2 = products.find((pp) => pp.name === it.product_name);
+                const vlist = prod2 ? variants.filter((vv) => vv.product_id === prod2.id) : [];
+                let varMatch = vlist.find((vv) => vv.name === it.variation);
+                if (!varMatch && prod2) {
+                    // might be synthetic we just added
+                    varMatch = variants.find((vv) => vv.product_id === prod2.id && vv.name === it.variation);
+                }
+
                 return {
-                    ...it,
-                    product_id: prod?.id,
+                    row_id: it.id,
+                    product_name: it.product_name,
+                    variation: it.variation,
+                    qty: Number(it.qty) || 0,
+                    wholesale_price: isAdmin ? Number(it.wholesale_price) || 0 : undefined,
+                    retail_price: Number(it.retail_price) || 0,
+                    product_id: prod2?.id,
                     variant_id: varMatch?.id,
-                } as Item;
+                };
             });
 
             setItems(reconciled);
+            setOriginalItemIds(reconciled.map((r) => r.row_id!).filter(Boolean));
             setLoading(false);
         })();
-    }, [orderId]);
+        // re-run if role OR client changes (important for per-client catalogs)
+    }, [orderId, isAdmin, clientId]);
 
-    const addItem = () => setItems(prev => [...prev, { product_name: "", variation: "", qty: 1, wholesale_price: 0, retail_price: 0 }]);
-    const removeItem = (idx: number) => setItems(prev => prev.filter((_, i) => i !== idx));
-    const updateItem = (idx: number, patch: Partial<Item>) => setItems(prev => prev.map((it, i) => (i === idx ? { ...it, ...patch } : it)));
+    const addItem = () =>
+        setItems((prev) => [
+            ...prev,
+            { product_name: "", variation: "", qty: 1, wholesale_price: isAdmin ? 0 : undefined, retail_price: 0 },
+        ]);
+    const removeItem = (idx: number) => setItems((prev) => prev.filter((_, i) => i !== idx));
+    const updateItem = (idx: number, patch: Partial<Item>) =>
+        setItems((prev) => prev.map((it, i) => (i === idx ? { ...it, ...patch } : it)));
 
     // totals
-    const wholesaleTotal = useMemo(() => items.reduce((s, it) => s + (it.qty || 0) * (it.wholesale_price || 0), 0), [items]);
-    const retailTotal = useMemo(() => items.reduce((s, it) => s + (it.qty || 0) * (it.retail_price || 0), 0), [items]);
+    const wholesaleTotal = useMemo(
+        () => items.reduce((s, it) => s + (it.qty || 0) * (it.wholesale_price || 0), 0),
+        [items]
+    );
+    const retailTotal = useMemo(
+        () => items.reduce((s, it) => s + (it.qty || 0) * (it.retail_price || 0), 0),
+        [items]
+    );
     const orderIncome = useMemo(() => retailTotal - (shopFees || 0), [retailTotal, shopFees]);
     const clientProfit = useMemo(() => orderIncome - wholesaleTotal, [orderIncome, wholesaleTotal]);
 
-    // handlers for dependent selects
+    // dependent selects
     const onSelectProduct = (idx: number, product_id: string) => {
-        const prod = products.find(p => p.id === product_id);
+        const prod = products.find((p) => p.id === product_id);
         updateItem(idx, {
             product_id,
             product_name: prod?.name || "",
             variant_id: undefined,
             variation: "",
-            wholesale_price: 0, // reset until variant chosen
+            wholesale_price: isAdmin ? 0 : undefined, // editors: keep undefined
+            retail_price: 0,
         });
     };
 
     const onSelectVariant = (idx: number, variant_id: string) => {
-        const v = variants.find(x => x.id === variant_id);
+        const v = variants.find((x) => x.id === variant_id);
         if (!v) return;
         updateItem(idx, {
             variant_id,
             variation: v.name,
-            wholesale_price: Number(v.wholesale_price) || 0, // auto-fill wholesale
-            retail_price: Number(v.retail_price_default ?? 0) || 0,       // NEW: auto-fill retail default
+            wholesale_price: isAdmin ? Number((v as any).wholesale_price) || 0 : undefined,
+            retail_price: Number((v as any).retail_price_default ?? 0) || 0,
         });
     };
 
@@ -126,10 +263,16 @@ export default function OrderEditor({
         try {
             let id = orderId;
 
+            // upsert order header
             if (!id) {
                 const { data, error } = await supabase
                     .from("orders")
-                    .insert({ client_id: clientId, order_code: orderCode || Date.now().toString(), shop_fees: shopFees, order_date: orderDate })
+                    .insert({
+                        client_id: clientId,
+                        order_code: orderCode || Date.now().toString(),
+                        shop_fees: shopFees,
+                        order_date: orderDate,
+                    })
                     .select("id")
                     .single();
                 if (error) throw error;
@@ -142,21 +285,55 @@ export default function OrderEditor({
                 if (error) throw error;
             }
 
-            // Replace items
-            const { error: eDel } = await supabase.from("order_items").delete().eq("order_id", id!);
-            if (eDel) throw eDel;
+            // compute deletions (items removed in UI)
+            const currentIds = items.map((it) => it.row_id).filter(Boolean) as string[];
+            const toDelete = originalItemIds.filter((oid) => !currentIds.includes(oid));
+            if (toDelete.length > 0) {
+                const { error } = await supabase.from("order_items").delete().in("id", toDelete);
+                if (error) throw error;
+            }
 
-            const payload = items.map((it) => ({
-                order_id: id,
-                product_name: (it.product_name || "").trim(),
-                variation: (it.variation || "").trim(),
-                qty: Number(it.qty) || 0,
-                wholesale_price: Number(it.wholesale_price) || 0,
-                retail_price: Number(it.retail_price) || 0,
-            }));
-            if (payload.length > 0) {
-                const { error: eIns } = await supabase.from("order_items").insert(payload);
-                if (eIns) throw eIns;
+            // updates and inserts
+            const updates = items
+                .filter((it) => it.row_id)
+                .map((it) => {
+                    const patch: any = {
+                        product_name: (it.product_name || "").trim(),
+                        variation: (it.variation || "").trim(),
+                        qty: Number(it.qty) || 0,
+                        retail_price: Number(it.retail_price) || 0,
+                    };
+                    if (isAdmin) {
+                        patch.wholesale_price = Number(it.wholesale_price) || 0;
+                    }
+                    return supabase.from("order_items").update(patch).eq("id", it.row_id);
+                });
+
+            const insertsData = items
+                .filter((it) => !it.row_id)
+                .map((it) => {
+                    const base: any = {
+                        order_id: id,
+                        product_name: (it.product_name || "").trim(),
+                        variation: (it.variation || "").trim(),
+                        qty: Number(it.qty) || 0,
+                        retail_price: Number(it.retail_price) || 0,
+                    };
+                    if (isAdmin) {
+                        base.wholesale_price = Number(it.wholesale_price) || 0;
+                    }
+                    return base;
+                });
+
+            if (updates.length) {
+                const results = await Promise.all(updates);
+                const err = results.find((r) => r.error);
+                if (err?.error) throw err.error;
+            }
+
+            if (insertsData.length) {
+                const { error } = await supabase.from("order_items").insert(insertsData);
+                if (error) throw error;
             }
 
             onCancel(clientId);
@@ -171,22 +348,38 @@ export default function OrderEditor({
 
     return (
         <div className="max-w-6xl mx-auto p-6 space-y-4">
-            <button className="underline" onClick={() => onCancel(clientId)}>← Back</button>
+            <button className="underline" onClick={() => onCancel(clientId)}>
+                ← Back
+            </button>
             <h1 className="text-2xl font-bold">{orderId ? "Edit Order" : "New Order"}</h1>
 
             <Card title="Order Info">
                 <div className="grid gap-3 md:grid-cols-3">
                     <div>
                         <label className="text-sm">Order ID</label>
-                        <input className="w-full border rounded-lg p-2" value={orderCode} onChange={e => setOrderCode(e.target.value)} />
+                        <input
+                            className="w-full border rounded-lg p-2"
+                            value={orderCode}
+                            onChange={(e) => setOrderCode(e.target.value)}
+                        />
                     </div>
                     <div>
                         <label className="text-sm">Shop Fees</label>
-                        <input className="w-full border rounded-lg p-2" type="number" value={shopFees} onChange={e => setShopFees(Number(e.target.value))} />
+                        <input
+                            className="w-full border rounded-lg p-2"
+                            type="number"
+                            value={shopFees}
+                            onChange={(e) => setShopFees(Number(e.target.value))}
+                        />
                     </div>
                     <div>
                         <label className="text-sm">Order Date</label>
-                        <input className="w-full border rounded-lg p-2" type="date" value={orderDate} onChange={e => setOrderDate(e.target.value)} />
+                        <input
+                            className="w-full border rounded-lg p-2"
+                            type="date"
+                            value={orderDate}
+                            onChange={(e) => setOrderDate(e.target.value)}
+                        />
                     </div>
                 </div>
             </Card>
@@ -199,8 +392,8 @@ export default function OrderEditor({
                                 <th className="p-2 text-left">Product</th>
                                 <th className="p-2 text-left">Variant</th>
                                 <th className="p-2 text-right">Qty</th>
-                                <th className="p-2 text-right">Wholesale price</th>
-                                <th className="p-2 text-right">Wholesale total</th>
+                                {isAdmin && <th className="p-2 text-right">Wholesale price</th>}
+                                {isAdmin && <th className="p-2 text-right">Wholesale total</th>}
                                 <th className="p-2 text-right">Retail price</th>
                                 <th className="p-2 text-right">Retail total</th>
                                 <th className="p-2"></th>
@@ -220,7 +413,11 @@ export default function OrderEditor({
                                                 onChange={(e) => onSelectProduct(idx, e.target.value)}
                                             >
                                                 <option value="">Select product…</option>
-                                                {products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                                                {products.map((p) => (
+                                                    <option key={p.id} value={p.id}>
+                                                        {p.name}
+                                                    </option>
+                                                ))}
                                             </select>
                                         </td>
                                         <td className="p-2">
@@ -230,16 +427,57 @@ export default function OrderEditor({
                                                 onChange={(e) => onSelectVariant(idx, e.target.value)}
                                                 disabled={!it.product_id}
                                             >
-                                                <option value="">{it.product_id ? "Select variant…" : "Pick a product first"}</option>
-                                                {opts.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
+                                                <option value="">
+                                                    {it.product_id ? "Select variant…" : "Pick a product first"}
+                                                </option>
+                                                {opts.map((v) => (
+                                                    <option key={v.id} value={v.id}>
+                                                        {v.name}
+                                                    </option>
+                                                ))}
                                             </select>
                                         </td>
-                                        <td className="p-2 text-right"><input className="w-24 border rounded p-1 text-right" type="number" value={it.qty} onChange={e => updateItem(idx, { qty: Number(e.target.value) })} /></td>
-                                        <td className="p-2 text-right"><input className="w-28 border rounded p-1 text-right" type="number" value={it.wholesale_price} onChange={e => updateItem(idx, { wholesale_price: Number(e.target.value) })} /></td>
-                                        <td className="p-2 text-right">₱{fmt(wTotal)}</td>
-                                        <td className="p-2 text-right"><input className="w-28 border rounded p-1 text-right" type="number" value={it.retail_price} onChange={e => updateItem(idx, { retail_price: Number(e.target.value) })} /></td>
+                                        <td className="p-2 text-right">
+                                            <input
+                                                className="w-24 border rounded p-1 text-right"
+                                                type="number"
+                                                value={it.qty}
+                                                onChange={(e) => updateItem(idx, { qty: Number(e.target.value) })}
+                                            />
+                                        </td>
+
+                                        {isAdmin && (
+                                            <>
+                                                <td className="p-2 text-right">
+                                                    <input
+                                                        className="w-28 border rounded p-1 text-right"
+                                                        type="number"
+                                                        value={it.wholesale_price || 0}
+                                                        onChange={(e) =>
+                                                            updateItem(idx, { wholesale_price: Number(e.target.value) })
+                                                        }
+                                                    />
+                                                </td>
+                                                <td className="p-2 text-right">₱{fmt(wTotal)}</td>
+                                            </>
+                                        )}
+
+                                        <td className="p-2 text-right">
+                                            <input
+                                                className="w-28 border rounded p-1 text-right"
+                                                type="number"
+                                                value={it.retail_price}
+                                                onChange={(e) =>
+                                                    updateItem(idx, { retail_price: Number(e.target.value) })
+                                                }
+                                            />
+                                        </td>
                                         <td className="p-2 text-right">₱{fmt(rTotal)}</td>
-                                        <td className="p-2 text-right"><button className="text-red-600" onClick={() => removeItem(idx)}>Remove</button></td>
+                                        <td className="p-2 text-right">
+                                            <button className="text-red-600" onClick={() => removeItem(idx)}>
+                                                Remove
+                                            </button>
+                                        </td>
                                     </tr>
                                 );
                             })}
@@ -249,15 +487,19 @@ export default function OrderEditor({
             </Card>
 
             <div className="grid gap-3 md:grid-cols-4">
-                <SummaryBox label="Wholesale Total" value={wholesaleTotal} />
+                {isAdmin && <SummaryBox label="Wholesale Total" value={wholesaleTotal} />}
                 <SummaryBox label="Retail Total" value={retailTotal} />
                 <SummaryBox label="Order Income (Retail - Fees)" value={orderIncome} />
-                <SummaryBox label="Client Profit (Income - Wholesale)" value={clientProfit} />
+                {isAdmin && <SummaryBox label="Client Profit (Income - Wholesale)" value={clientProfit} />}
             </div>
 
             <div className="flex gap-2">
-                <button className="bg-black text-white rounded-lg px-4 py-2" onClick={save} disabled={saving}>{saving ? "Saving..." : "Save"}</button>
-                <button className="px-4 py-2" onClick={() => onCancel(clientId)}>Cancel</button>
+                <button className="bg-black text-white rounded-lg px-4 py-2" onClick={save} disabled={saving}>
+                    {saving ? "Saving..." : "Save"}
+                </button>
+                <button className="px-4 py-2" onClick={() => onCancel(clientId)}>
+                    Cancel
+                </button>
             </div>
         </div>
     );
