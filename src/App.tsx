@@ -13,7 +13,6 @@ type AppRoute =
   | { name: "dashboard" }
   | { name: "client"; params: { id: string } }
   | { name: "order"; params: { id?: string; clientId: string } }
-  // ⬇️ require clientId so Products is always scoped to a client
   | { name: "products"; params: { clientId: string; fromClientId?: string } };
 
 type UserRole = "admin" | "editor";
@@ -24,7 +23,7 @@ export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [authReady, setAuthReady] = useState(false);
 
-  // role: render immediately with safe default
+  // render immediately with a safe default
   const [userRole, setUserRole] = useState<UserRole>("editor");
   const isLoggedIn = !!session;
   const isAdmin = userRole === "admin";
@@ -49,7 +48,7 @@ export default function App() {
     ]);
   };
 
-  // ---- init auth (don’t wait on role to render UI) ----
+  // ---- init auth (don’t block UI on role fetch) ----
   useEffect(() => {
     let mounted = true;
 
@@ -64,7 +63,7 @@ export default function App() {
 
         if (s) {
           setRoute({ name: "dashboard" });
-          loadRole(s.user.id); // non-blocking
+          loadRole(s.user.id); // fire-and-forget
         } else {
           setUserRole("editor");
           setRoute({ name: "login" });
@@ -97,16 +96,16 @@ export default function App() {
     };
   }, []);
 
-  // --- ROUTE GUARD: hide Products for editors + require clientId ---
+  // --- ROUTE GUARD: Products is admin-only and must be scoped to a client ---
   const go = (next: AppRoute) => {
     if (next.name === "products") {
       if (!isAdmin) return setRoute({ name: "dashboard" });
-      if (!next.params?.clientId) return setRoute({ name: "dashboard" }); // must be scoped
+      if (!next.params?.clientId) return setRoute({ name: "dashboard" });
     }
     setRoute(next);
   };
 
-  // Safety: if role changes while on Products, bounce away
+  // If role flips while on Products, bounce out
   useEffect(() => {
     if (route.name === "products" && !isAdmin) {
       const fromClientId = route.params?.fromClientId;
@@ -130,14 +129,23 @@ export default function App() {
         <>
           <Topbar
             onSignOut={async () => {
-              await supabase.auth.signOut();
+              try {
+                // 1) local sign out (no 403 spam)
+                await supabase.auth.signOut({ scope: "local" });
+              } finally {
+                // 2) immediately clear local app state & navigate
+                setSession(null);
+                setUserRole("editor");
+                setRoute({ name: "login" });
+              }
+              // 3) optional: best-effort global revoke (ignore failures)
+              // try { await supabase.auth.signOut({ scope: "global" }); } catch {}
             }}
             onHome={() => go({ name: "dashboard" })}
           />
 
           {route.name === "dashboard" && (
             <DashboardPage
-              isAdmin={isAdmin}
               onOpenClient={(cId) => go({ name: "client", params: { id: cId } })}
             />
           )}
@@ -151,7 +159,7 @@ export default function App() {
               onOpenOrder={(orderId, clientId) =>
                 go({ name: "order", params: { id: orderId, clientId } })
               }
-              // ⬇️ pass the clientId into Products so it’s scoped
+              // pass clientId so Products is always scoped
               onOpenProducts={() =>
                 go({ name: "products", params: { clientId: route.params.id, fromClientId: route.params.id } })
               }
@@ -170,7 +178,7 @@ export default function App() {
           {route.name === "products" && (
             <ProductsPage
               isAdmin={isAdmin}
-              clientId={route.params.clientId}  // ⬅️ ProductsPage should accept this prop
+              clientId={route.params.clientId}
               onBack={() => {
                 const fromClientId = route.params?.fromClientId;
                 go(fromClientId ? { name: "client", params: { id: fromClientId } } : { name: "dashboard" });
@@ -190,14 +198,27 @@ function Topbar({
   onSignOut: () => void | Promise<void>;
   onHome: () => void;
 }) {
+  const [signingOut, setSigningOut] = useState(false);
+
   return (
     <div className="sticky top-0 z-10 bg-white border-b">
       <div className="max-w-6xl mx-auto p-3 flex items-center justify-between">
         <button className="text-lg font-semibold" onClick={onHome}>
           Sales Record System
         </button>
-        <button className="text-sm text-red-600" onClick={onSignOut}>
-          Sign out
+        <button
+          className="text-sm text-red-600"
+          disabled={signingOut}
+          onClick={async () => {
+            setSigningOut(true);
+            try {
+              await onSignOut();
+            } finally {
+              setSigningOut(false);
+            }
+          }}
+        >
+          {signingOut ? "Signing out…" : "Sign out"}
         </button>
       </div>
     </div>
