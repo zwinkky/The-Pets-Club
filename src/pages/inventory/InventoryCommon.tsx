@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
 import { supabase } from "../../lib/supabaseClient";
 import Card from "../../components/Card";
@@ -44,11 +45,15 @@ export function InventoryTable({
     title,
     clientId,
     disableNew,
+    toolbarRight,      // NEW
+    searchDisabled,    // NEW
 }: {
     type: "raw" | "general" | "client";
     title: string;
     clientId?: string | null;
     disableNew?: boolean;
+    toolbarRight?: ReactNode;   // NEW
+    searchDisabled?: boolean;   // NEW
 }) {
     const [rows, setRows] = useState<InventoryRow[]>([]);
     const [search, setSearch] = useState("");
@@ -87,11 +92,13 @@ export function InventoryTable({
                 <h2 className="text-lg font-semibold">{title}</h2>
 
                 <div className="ml-auto flex items-center gap-2">
+                    {toolbarRight /* client picker goes here (if provided) */}
                     <input
                         placeholder="Search by name…"
-                        className="border px-3 py-2 rounded w-64"
+                        className={`border px-3 py-2 rounded w-64 ${searchDisabled ? "bg-gray-100 text-gray-500 cursor-not-allowed" : ""}`}
                         value={search}
                         onChange={(e) => setSearch(e.target.value)}
+                        disabled={!!searchDisabled}
                     />
                     <NewItemButton
                         defaultType={type}
@@ -132,7 +139,7 @@ export function InventoryTable({
                                     <td className="p-2">
                                         <div className="flex items-center justify-end gap-2">
                                             <MovementMenu item={r} onChange={load} clientId={clientId || undefined} />
-                                            <EditItemButton item={r} onSaved={load} /> {/* ← NEW */}
+                                            <EditItemButton item={r} onSaved={load} />
                                             <DeleteItemButton item={r} onDeleted={load} />
                                         </div>
                                     </td>
@@ -255,8 +262,8 @@ function MovementMenu({
     clientId?: string | null;
 }) {
     const [open, setOpen] = useState<null | "in" | "out" | "transfer">(null);
-    const [qty, setQty] = useState<number>(0);          // consumed (source)
-    const [prodQty, setProdQty] = useState<number | "">(""); // produced (dest)
+    const [qty, setQty] = useState<number>(0);
+    const [prodQty, setProdQty] = useState<number | "">("");
     const [note, setNote] = useState("");
     const [toItem, setToItem] = useState<{
         id: string;
@@ -281,8 +288,7 @@ function MovementMenu({
             if (!toItem) return alert("Select destination item");
 
             const available = Number(item.qty_on_hand ?? 0);
-            if (qty > available)
-                return alert(`Not enough stock to transfer. Available: ${available}`);
+            if (qty > available) return alert(`Not enough stock to transfer. Available: ${available}`);
 
             const finalProdQty = prodQty === "" ? qty : Number(prodQty);
             if (!Number.isFinite(finalProdQty) || finalProdQty < 0)
@@ -476,7 +482,7 @@ function TransferPicker({
     );
 }
 
-/* ---------- Edit (NEW) ---------- */
+/* ---------- Edit ---------- */
 function EditItemButton({
     item,
     onSaved,
