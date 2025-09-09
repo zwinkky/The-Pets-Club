@@ -8,17 +8,43 @@ import ClientPage from "./pages/ClientPage";
 import OrderEditor from "./pages/OrderEditor";
 import ProductsPage from "./pages/ProductsPage";
 
+// Inventory hub + sections
+import InventoryPage from "./pages/InventoryPage";               // hub (shows 3 tiles)
+import InventoryRawPage from "./pages/InventoryRawPage";         // NEW
+import InventoryGeneralPage from "./pages/InventoryGeneralPage"; // NEW
+import InventoryClientsPage from "./pages/InventoryClientsPage"; // NEW
+
 type AppRoute =
   | { name: "login" }
   | { name: "dashboard" }
   | { name: "client"; params: { id: string } }
   | { name: "order"; params: { id?: string; clientId: string } }
-  | { name: "products"; params: { clientId: string; fromClientId?: string } };
+  | { name: "products"; params: { clientId: string; fromClientId?: string } }
+  | { name: "inventory" }            // hub
+  | { name: "inventory_raw" }        // NEW
+  | { name: "inventory_general" }    // NEW
+  | { name: "inventory_clients" };   // NEW
 
 type UserRole = "admin" | "editor";
 
+// ---- persist/restore route across tab switches/reloads ----
+const ROUTE_KEY = "app_route";
+const loadRoute = (): AppRoute => {
+  try {
+    const raw = localStorage.getItem(ROUTE_KEY);
+    return raw ? JSON.parse(raw) : { name: "login" };
+  } catch {
+    return { name: "login" };
+  }
+};
+const saveRoute = (r: AppRoute) => {
+  try {
+    localStorage.setItem(ROUTE_KEY, JSON.stringify(r));
+  } catch { }
+};
+
 export default function App() {
-  const [route, setRoute] = useState<AppRoute>({ name: "login" });
+  const [route, setRoute] = useState<AppRoute>(() => loadRoute());
 
   const [session, setSession] = useState<Session | null>(null);
   const [authReady, setAuthReady] = useState(false);
@@ -27,6 +53,11 @@ export default function App() {
   const [userRole, setUserRole] = useState<UserRole>("editor");
   const isLoggedIn = !!session;
   const isAdmin = userRole === "admin";
+
+  // keep route persisted
+  useEffect(() => {
+    saveRoute(route);
+  }, [route]);
 
   // ---- helpers ----
   const loadRole = async (userId: string) => {
@@ -48,7 +79,7 @@ export default function App() {
     ]);
   };
 
-  // ---- init auth (don’t block UI on role fetch) ----
+  // ---- init auth (don’t override route unless necessary) ----
   useEffect(() => {
     let mounted = true;
 
@@ -62,9 +93,14 @@ export default function App() {
         setAuthReady(true); // render now
 
         if (s) {
-          setRoute({ name: "dashboard" });
+          // logged in: restore last route if we were on "login"
           loadRole(s.user.id); // fire-and-forget
+          if (route.name === "login") {
+            const last = loadRoute();
+            setRoute(last.name === "login" ? { name: "dashboard" } : last);
+          }
         } else {
+          // logged out
           setUserRole("editor");
           setRoute({ name: "login" });
         }
@@ -78,23 +114,30 @@ export default function App() {
       }
     })();
 
-    const { data: sub } = supabase.auth.onAuthStateChange(async (_e, s) => {
+    const { data: sub } = supabase.auth.onAuthStateChange((event, s) => {
       if (!mounted) return;
       setSession(s);
-      if (s) {
-        setRoute({ name: "dashboard" });
-        loadRole(s.user.id);
-      } else {
+
+      // Only navigate on explicit sign-in/sign-out.
+      if (event === "SIGNED_OUT") {
         setUserRole("editor");
         setRoute({ name: "login" });
       }
+      if (event === "SIGNED_IN") {
+        if (s) loadRole(s.user.id);
+        const last = loadRoute();
+        setRoute(last.name === "login" ? { name: "dashboard" } : last);
+      }
+
+      // Ignore TOKEN_REFRESHED / USER_UPDATED etc. to prevent unwanted jumps.
     });
 
     return () => {
       mounted = false;
       sub?.subscription?.unsubscribe?.();
     };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // (route is intentionally not a dep to avoid loops)
 
   // --- ROUTE GUARD: Products is admin-only and must be scoped to a client ---
   const go = (next: AppRoute) => {
@@ -109,9 +152,14 @@ export default function App() {
   useEffect(() => {
     if (route.name === "products" && !isAdmin) {
       const fromClientId = route.params?.fromClientId;
-      setRoute(fromClientId ? { name: "client", params: { id: fromClientId } } : { name: "dashboard" });
+      setRoute(
+        fromClientId
+          ? { name: "client", params: { id: fromClientId } }
+          : { name: "dashboard" }
+      );
     }
-  }, [isAdmin, route.name]); // eslint-disable-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAdmin, route.name]);
 
   if (!authReady) {
     return (
@@ -128,6 +176,9 @@ export default function App() {
       ) : (
         <>
           <Topbar
+            active={route.name}
+            onHome={() => go({ name: "dashboard" })}
+            onOpenInventory={() => go({ name: "inventory" })}
             onSignOut={async () => {
               try {
                 // 1) local sign out (no 403 spam)
@@ -138,10 +189,9 @@ export default function App() {
                 setUserRole("editor");
                 setRoute({ name: "login" });
               }
-              // 3) optional: best-effort global revoke (ignore failures)
+              // 3) optional global revoke (ignore failures)
               // try { await supabase.auth.signOut({ scope: "global" }); } catch {}
             }}
-            onHome={() => go({ name: "dashboard" })}
           />
 
           {route.name === "dashboard" && (
@@ -159,9 +209,14 @@ export default function App() {
               onOpenOrder={(orderId, clientId) =>
                 go({ name: "order", params: { id: orderId, clientId } })
               }
-              // pass clientId so Products is always scoped
               onOpenProducts={() =>
-                go({ name: "products", params: { clientId: route.params.id, fromClientId: route.params.id } })
+                go({
+                  name: "products",
+                  params: {
+                    clientId: route.params.id,
+                    fromClientId: route.params.id,
+                  },
+                })
               }
             />
           )}
@@ -181,10 +236,32 @@ export default function App() {
               clientId={route.params.clientId}
               onBack={() => {
                 const fromClientId = route.params?.fromClientId;
-                go(fromClientId ? { name: "client", params: { id: fromClientId } } : { name: "dashboard" });
+                go(
+                  fromClientId
+                    ? { name: "client", params: { id: fromClientId } }
+                    : { name: "dashboard" }
+                );
               }}
             />
           )}
+
+          {/* Inventory Hub + Section routes */}
+          {route.name === "inventory" && (
+            <InventoryPage
+              onOpenSection={(s) =>
+                go(
+                  s === "raw"
+                    ? { name: "inventory_raw" }
+                    : s === "general"
+                      ? { name: "inventory_general" }
+                      : { name: "inventory_clients" }
+                )
+              }
+            />
+          )}
+          {route.name === "inventory_raw" && <InventoryRawPage />}
+          {route.name === "inventory_general" && <InventoryGeneralPage />}
+          {route.name === "inventory_clients" && <InventoryClientsPage />}
         </>
       )}
     </div>
@@ -192,20 +269,42 @@ export default function App() {
 }
 
 function Topbar({
+  active,
   onSignOut,
   onHome,
+  onOpenInventory,
 }: {
+  active: AppRoute["name"];
   onSignOut: () => void | Promise<void>;
   onHome: () => void;
+  onOpenInventory: () => void;
 }) {
   const [signingOut, setSigningOut] = useState(false);
+  const btn = (isActive: boolean) =>
+    `px-3 py-2 rounded ${isActive ? "bg-gray-900 text-white" : "bg-gray-100 hover:bg-gray-200"}`;
+
+  // Highlight Inventory for the hub and all section pages
+  const isInv =
+    active === "inventory" ||
+    active === "inventory_raw" ||
+    active === "inventory_general" ||
+    active === "inventory_clients";
 
   return (
     <div className="sticky top-0 z-10 bg-white border-b">
       <div className="max-w-6xl mx-auto p-3 flex items-center justify-between">
-        <button className="text-lg font-semibold" onClick={onHome}>
-          Sales Record System
-        </button>
+        <div className="flex items-center gap-2">
+          <button className="text-lg font-semibold mr-2" onClick={onHome}>
+            Sales Record System
+          </button>
+          <button className={btn(active === "dashboard")} onClick={onHome}>
+            Dashboard
+          </button>
+          <button className={btn(isInv)} onClick={onOpenInventory}>
+            Inventory
+          </button>
+        </div>
+
         <button
           className="text-sm text-red-600"
           disabled={signingOut}

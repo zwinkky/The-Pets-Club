@@ -18,12 +18,21 @@ type Item = {
     variation: string;
     qty: number;
     wholesale_price?: number; // admin-only
-    retail_price: number;
+    retail_price: number;     // base unit price (before discount)
+    discount_pct?: number;    // NEW (0-100); persisted only if column exists
     product_id?: string;
     variant_id?: string;
 };
 
 const today = () => new Date().toISOString().slice(0, 10);
+
+// helpers
+const clampPct = (n: number | undefined) => Math.max(0, Math.min(100, Number(n || 0)));
+const priceAfterDiscount = (base: number | undefined, pct: number | undefined) => {
+    const b = Number(base || 0);
+    const p = clampPct(pct);
+    return b * (1 - p / 100);
+};
 
 export default function OrderEditor({
     isAdmin,
@@ -40,12 +49,13 @@ export default function OrderEditor({
     const [orderDate, setOrderDate] = useState<string>(today());
     const [shopFees, setShopFees] = useState<number>(0);
     const [items, setItems] = useState<Item[]>([
-        { product_name: "", variation: "", qty: 1, wholesale_price: isAdmin ? 0 : undefined, retail_price: 0 },
+        { product_name: "", variation: "", qty: 1, wholesale_price: isAdmin ? 0 : undefined, retail_price: 0, discount_pct: 0 },
     ]);
     const [saving, setSaving] = useState(false);
     const [loading, setLoading] = useState(true);
 
     const [originalItemIds, setOriginalItemIds] = useState<string[]>([]);
+    const [hasDiscountCol, setHasDiscountCol] = useState<boolean>(false); // NEW
 
     // client-scoped catalog
     const [products, setProducts] = useState<Product[]>([]);
@@ -62,6 +72,12 @@ export default function OrderEditor({
     useEffect(() => {
         (async () => {
             setLoading(true);
+
+            // (0) Detect whether the DB has an order_items.discount_pct column
+            {
+                const probe = await supabase.from("order_items").select("discount_pct").limit(1);
+                setHasDiscountCol(!probe.error); // true if column exists
+            }
 
             // 1) Load client-scoped catalog
             let catRows: any[] = [];
@@ -80,13 +96,12 @@ export default function OrderEditor({
                 }
             }
 
-            // Build LOCAL arrays (strings for IDs) — we'll reconcile with these
+            // Build LOCAL arrays (strings for IDs)
             const prodMap = new Map<string, Product>();
             const varList: VariantOption[] = [];
             for (const r of catRows) {
                 const pid = String(r.product_id);
                 const vid = String(r.variant_id);
-
                 if (!prodMap.has(pid)) {
                     prodMap.set(pid, { id: pid, name: r.product_name } as Product);
                 }
@@ -100,8 +115,6 @@ export default function OrderEditor({
             }
             const prods = Array.from(prodMap.values()).sort((a, b) => a.name.localeCompare(b.name));
             const vars = varList;
-
-            // Push to state for rendering
             setProducts(prods);
             setVariants(vars);
 
@@ -130,43 +143,51 @@ export default function OrderEditor({
 
             let rows: any[] = [];
             if (isAdmin) {
+                const cols = `id,product_name,variation,qty,wholesale_price,retail_price${hasDiscountCol ? ",discount_pct" : ""}`;
                 const { data: its, error: e2 } = await supabase
                     .from("order_items")
-                    .select("id,product_name,variation,qty,wholesale_price,retail_price")
+                    .select(cols)
                     .eq("order_id", orderId)
                     .order("id");
                 if (e2) alert(e2.message);
                 rows = its || [];
             } else {
-                const rpc = await supabase.rpc("order_items_for_editor", { p_order_id: orderId });
-                if (rpc.error) {
-                    const { data: its, error: e2 } = await supabase
-                        .from("order_items")
-                        .select("id,product_name,variation,qty,retail_price")
-                        .eq("order_id", orderId)
-                        .order("id");
-                    if (e2) alert(e2.message);
-                    rows = its || [];
+                // try direct read to include discount_pct; else fall back to RPC
+                const cols = `id,product_name,variation,qty,retail_price${hasDiscountCol ? ",discount_pct" : ""}`;
+                const direct = await supabase
+                    .from("order_items")
+                    .select(cols)
+                    .eq("order_id", orderId)
+                    .order("id");
+                if (direct.error) {
+                    const rpc = await supabase.rpc("order_items_for_editor", { p_order_id: orderId });
+                    if (rpc.error) {
+                        const { data: its, error: e2 } = await supabase
+                            .from("order_items")
+                            .select("id,product_name,variation,qty,retail_price")
+                            .eq("order_id", orderId)
+                            .order("id");
+                        if (e2) alert(e2.message);
+                        rows = its || [];
+                    } else {
+                        rows = (rpc.data || []).map((r: any) => ({
+                            id: r.id,
+                            product_name: r.product_name,
+                            variation: r.variation,
+                            qty: Number(r.quantity) || 0,
+                            retail_price: Number(r.retail_price) || 0,
+                        }));
+                    }
                 } else {
-                    rows = (rpc.data || []).map((r: any) => ({
-                        id: r.id,
-                        product_name: r.product_name,
-                        variation: r.variation,
-                        qty: Number(r.quantity) || 0,
-                        retail_price: Number(r.retail_price) || 0,
-                    }));
+                    rows = direct.data || [];
                 }
             }
 
-            // 3) Reconcile using the freshly fetched LOCAL catalog (not stale state)
+            // 3) Reconcile using freshly fetched LOCAL catalog
             const reconciled: Item[] = rows.map((it: any) => {
-                const prod =
-                    prods.find((pp) => pp.name === it.product_name) || // usual path (matching by name)
-                    undefined;
-
+                const prod = prods.find((pp) => pp.name === it.product_name) || undefined;
                 const vlist = prod ? vars.filter((vv) => vv.product_id === String(prod.id)) : [];
                 const varMatch = vlist.find((vv) => vv.name === it.variation);
-
                 return {
                     row_id: String(it.id),
                     product_name: it.product_name,
@@ -174,6 +195,7 @@ export default function OrderEditor({
                     qty: Number(it.qty) || 0,
                     wholesale_price: isAdmin ? Number(it.wholesale_price) || 0 : undefined,
                     retail_price: Number(it.retail_price) || 0,
+                    discount_pct: hasDiscountCol ? clampPct(Number(it.discount_pct)) : 0, // persist if available; else reset
                     product_id: prod ? String(prod.id) : undefined,
                     variant_id: varMatch ? String(varMatch.id) : undefined,
                 };
@@ -188,19 +210,19 @@ export default function OrderEditor({
     const addItem = () =>
         setItems((prev) => [
             ...prev,
-            { product_name: "", variation: "", qty: 1, wholesale_price: isAdmin ? 0 : undefined, retail_price: 0 },
+            { product_name: "", variation: "", qty: 1, wholesale_price: isAdmin ? 0 : undefined, retail_price: 0, discount_pct: 0 },
         ]);
     const removeItem = (idx: number) => setItems((prev) => prev.filter((_, i) => i !== idx));
     const updateItem = (idx: number, patch: Partial<Item>) =>
         setItems((prev) => prev.map((it, i) => (i === idx ? { ...it, ...patch } : it)));
 
-    // totals
+    // totals (use discounted price)
     const wholesaleTotal = useMemo(
         () => items.reduce((s, it) => s + (it.qty || 0) * (it.wholesale_price || 0), 0),
         [items]
     );
     const retailTotal = useMemo(
-        () => items.reduce((s, it) => s + (it.qty || 0) * (it.retail_price || 0), 0),
+        () => items.reduce((s, it) => s + (it.qty || 0) * priceAfterDiscount(it.retail_price, it.discount_pct), 0),
         [items]
     );
     const orderIncome = useMemo(() => retailTotal - (shopFees || 0), [retailTotal, shopFees]);
@@ -216,6 +238,7 @@ export default function OrderEditor({
             variation: "",
             wholesale_price: isAdmin ? 0 : undefined,
             retail_price: 0,
+            discount_pct: 0,
         });
     };
 
@@ -227,6 +250,7 @@ export default function OrderEditor({
             variation: v.name,
             wholesale_price: isAdmin ? Number(v.wholesale_price ?? 0) : undefined,
             retail_price: Number(v.retail_price_default ?? 0),
+            discount_pct: 0,
         });
     };
 
@@ -265,7 +289,7 @@ export default function OrderEditor({
                 if (error) throw error;
             }
 
-            // updates
+            // updates (persist discounted price; discount_pct if supported)
             const updates = items
                 .filter((it) => it.row_id)
                 .map((it) => {
@@ -273,8 +297,9 @@ export default function OrderEditor({
                         product_name: (it.product_name || "").trim(),
                         variation: (it.variation || "").trim(),
                         qty: Number(it.qty) || 0,
-                        retail_price: Number(it.retail_price) || 0,
+                        retail_price: Number(priceAfterDiscount(it.retail_price, it.discount_pct)) || 0,
                     };
+                    if (hasDiscountCol) patch.discount_pct = clampPct(it.discount_pct);
                     if (isAdmin) patch.wholesale_price = Number(it.wholesale_price) || 0;
                     return supabase.from("order_items").update(patch).eq("id", it.row_id);
                 });
@@ -293,8 +318,9 @@ export default function OrderEditor({
                         product_name: (it.product_name || "").trim(),
                         variation: (it.variation || "").trim(),
                         qty: Number(it.qty) || 0,
-                        retail_price: Number(it.retail_price) || 0,
+                        retail_price: Number(priceAfterDiscount(it.retail_price, it.discount_pct)) || 0,
                     };
+                    if (hasDiscountCol) base.discount_pct = clampPct(it.discount_pct);
                     if (isAdmin) base.wholesale_price = Number(it.wholesale_price) || 0;
                     return base;
                 });
@@ -345,6 +371,7 @@ export default function OrderEditor({
                                 <th className="p-2 text-right">Qty</th>
                                 {isAdmin && <th className="p-2 text-right">Wholesale price</th>}
                                 {isAdmin && <th className="p-2 text-right">Wholesale total</th>}
+                                <th className="p-2 text-right">Disc. %</th>
                                 <th className="p-2 text-right">Retail price</th>
                                 <th className="p-2 text-right">Retail total</th>
                                 <th className="p-2"></th>
@@ -352,9 +379,12 @@ export default function OrderEditor({
                         </thead>
                         <tbody>
                             {items.map((it, idx) => {
+                                const unitAfter = priceAfterDiscount(it.retail_price, it.discount_pct);
                                 const wTotal = (it.qty || 0) * (it.wholesale_price || 0);
-                                const rTotal = (it.qty || 0) * (it.retail_price || 0);
+                                const rTotal = (it.qty || 0) * unitAfter;
                                 const opts = it.product_id ? (variantsByProduct[it.product_id] || []) : [];
+                                const discounted = clampPct(it.discount_pct) > 0;
+
                                 return (
                                     <tr key={idx} className="border-b">
                                         <td className="p-2">
@@ -407,12 +437,34 @@ export default function OrderEditor({
 
                                         <td className="p-2 text-right">
                                             <input
-                                                className="w-28 border rounded p-1 text-right"
+                                                className="w-20 border rounded p-1 text-right"
                                                 type="number"
-                                                value={it.retail_price}
-                                                onChange={(e) => updateItem(idx, { retail_price: Number(e.target.value) })}
+                                                min={0}
+                                                max={100}
+                                                step="0.01"
+                                                value={clampPct(it.discount_pct)}
+                                                onChange={(e) => updateItem(idx, { discount_pct: clampPct(Number(e.target.value)) })}
+                                                placeholder="0"
+                                                title="Discount percentage"
                                             />
                                         </td>
+
+                                        <td className="p-2 text-right">
+                                            <div className="flex flex-col items-end">
+                                                <input
+                                                    className="w-28 border rounded p-1 text-right"
+                                                    type="number"
+                                                    value={it.retail_price}
+                                                    onChange={(e) => updateItem(idx, { retail_price: Number(e.target.value) })}
+                                                    title="Unit price before discount"
+                                                />
+                                                <div className="text-xs text-gray-500 mt-1">
+                                                    after: ₱{fmt(unitAfter)} {discounted && <span className="ml-1 inline-block px-2 py-0.5 rounded bg-yellow-100 text-yellow-700">Discounted</span>}
+                                                    {hasDiscountCol && discounted && <span className="ml-1 text-gray-400">({clampPct(it.discount_pct)}%)</span>}
+                                                </div>
+                                            </div>
+                                        </td>
+
                                         <td className="p-2 text-right">₱{fmt(rTotal)}</td>
                                         <td className="p-2 text-right">
                                             <button className="text-red-600" onClick={() => removeItem(idx)}>Remove</button>
