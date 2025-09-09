@@ -1,8 +1,8 @@
-// components/Card.tsx
-import { ReactNode } from "react";
+// src/components/Card.tsx
+import type { ReactNode } from "react"; // ← type-only import fixes TS1484
 
 export type CardProps = {
-    title?: ReactNode;          // ← make optional
+    title?: ReactNode;
     actions?: ReactNode;
     className?: string;
     children: ReactNode;
