@@ -1,4 +1,3 @@
-import { useEffect, useState } from "react";
 import Card from "../components/Card";
 
 export default function InventoryPage({
@@ -46,8 +45,9 @@ export default function InventoryPage({
 
             <Card>
                 <div className="p-4 text-sm text-gray-600">
-                    Tip: Use <span className="font-mono">Inventory → Clients</span> when you convert unlabeled stock to a
-                    client-labeled batch (TRANSFER), and use <span className="font-mono">OUT</span> when shipping to the client.
+                    Tip: Use <span className="font-mono">Inventory → Clients</span> when you convert unlabeled
+                    stock to a client-labeled batch (TRANSFER), and use{" "}
+                    <span className="font-mono">OUT</span> when shipping to the client.
                 </div>
             </Card>
         </div>
