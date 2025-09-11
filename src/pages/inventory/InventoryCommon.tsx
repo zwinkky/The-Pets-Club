@@ -17,13 +17,10 @@ export type InventoryRow = {
     product_id?: string | null;
     variant_id?: string | null;
     client_id?: string | null;
-    category?: string | null;          // text category
+    category?: string | null; // text category
 };
 
-// Optional seeds to show in the UI until real data arrives
-const STARTER_CATEGORY_OPTIONS = [
-
-];
+// (no seed categories)
 
 const fmtNum = (v: number | string | null | undefined) => {
     const n = typeof v === "string" ? Number(v) : typeof v === "number" ? v : 0;
@@ -66,9 +63,7 @@ export function InventoryTable({
 
     // Category filter + dynamic options
     const [categoryFilter, setCategoryFilter] = useState<string>("__ALL__");
-    const [categoryOptions, setCategoryOptions] = useState<string[]>(
-        STARTER_CATEGORY_OPTIONS
-    );
+    const [categoryOptions, setCategoryOptions] = useState<string[]>([]); // start empty
 
     const showReorder = type === "raw";
     const colCount =
@@ -112,9 +107,7 @@ export function InventoryTable({
 
         // Build/merge distinct category options from result
         const discovered = Array.from(
-            new Set(
-                next.map((r) => (r.category || "").trim()).filter(Boolean)
-            )
+            new Set(next.map((r) => (r.category || "").trim()).filter(Boolean))
         );
         setCategoryOptions((prev) =>
             Array.from(new Set([...(prev ?? []), ...discovered])).sort()
@@ -132,9 +125,7 @@ export function InventoryTable({
     function handleCategoryCreated(c: string) {
         const v = c.trim();
         if (!v) return;
-        setCategoryOptions((prev) =>
-            prev.includes(v) ? prev : [...prev, v].sort()
-        );
+        setCategoryOptions((prev) => (prev.includes(v) ? prev : [...prev, v].sort()));
     }
 
     return (
@@ -204,9 +195,7 @@ export function InventoryTable({
                                     <td className="p-2">{r.unit}</td>
                                     <td className="p-2 text-right tabular-nums">{fmtNum(r.qty_on_hand)}</td>
                                     {showReorder && (
-                                        <td className="p-2 text-right tabular-nums">
-                                            {fmtNum(r.reorder_point)}
-                                        </td>
+                                        <td className="p-2 text-right tabular-nums">{fmtNum(r.reorder_point)}</td>
                                     )}
                                     <td className="p-2"><StatusChip status={r.reorder_status} /></td>
                                     <td className="p-2">{r.category || "—"}</td>
@@ -227,9 +216,7 @@ export function InventoryTable({
                             {!rows.length && (
                                 <tr>
                                     <td colSpan={colCount} className="p-8 text-center text-gray-500">
-                                        {type === "client" && !clientId
-                                            ? "Select a client to view items."
-                                            : "No items yet."}
+                                        {type === "client" && !clientId ? "Select a client to view items." : "No items yet."}
                                     </td>
                                 </tr>
                             )}
@@ -293,9 +280,7 @@ function NewItemButton({
         onCreated();
     }
 
-    const btnCls = disabled
-        ? "bg-gray-300 text-gray-600"
-        : "bg-emerald-600 hover:bg-emerald-700 text-white";
+    const btnCls = disabled ? "bg-gray-300 text-gray-600" : "bg-emerald-600 hover:bg-emerald-700 text-white";
 
     return (
         <>
