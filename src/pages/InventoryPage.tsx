@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import Card from "../components/Card";
 
 export default function InventoryPage({

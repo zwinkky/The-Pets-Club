@@ -17,7 +17,13 @@ export type InventoryRow = {
     product_id?: string | null;
     variant_id?: string | null;
     client_id?: string | null;
+    category?: string | null;          // text category
 };
+
+// Optional seeds to show in the UI until real data arrives
+const STARTER_CATEGORY_OPTIONS = [
+
+];
 
 const fmtNum = (v: number | string | null | undefined) => {
     const n = typeof v === "string" ? Number(v) : typeof v === "number" ? v : 0;
@@ -45,21 +51,34 @@ export function InventoryTable({
     title,
     clientId,
     disableNew,
-    toolbarRight,      // NEW
-    searchDisabled,    // NEW
+    toolbarRight,
+    searchDisabled,
 }: {
     type: "raw" | "general" | "client";
     title: string;
     clientId?: string | null;
     disableNew?: boolean;
-    toolbarRight?: ReactNode;   // NEW
-    searchDisabled?: boolean;   // NEW
+    toolbarRight?: ReactNode;
+    searchDisabled?: boolean;
 }) {
     const [rows, setRows] = useState<InventoryRow[]>([]);
     const [search, setSearch] = useState("");
 
+    // Category filter + dynamic options
+    const [categoryFilter, setCategoryFilter] = useState<string>("__ALL__");
+    const [categoryOptions, setCategoryOptions] = useState<string[]>(
+        STARTER_CATEGORY_OPTIONS
+    );
+
     const showReorder = type === "raw";
-    const colCount = 4 /* name, unit, on hand, status */ + (showReorder ? 1 : 0) + 1; // +actions
+    const colCount =
+        1 + // name
+        1 + // unit
+        1 + // on hand
+        (showReorder ? 1 : 0) +
+        1 + // status
+        1 + // category
+        1; // actions
 
     async function load() {
         if (type === "client" && !clientId) {
@@ -75,15 +94,48 @@ export function InventoryTable({
 
         if (type === "client" && clientId) q = q.eq("client_id", clientId);
         if (search.trim()) q = q.ilike("name", `%${search.trim()}%`);
+        if (categoryFilter !== "__ALL__") q = q.eq("category", categoryFilter as any);
 
         const { data, error } = await q;
-        if (!error) setRows((data ?? []) as InventoryRow[]);
+        if (error) return;
+
+        let next = (data ?? []) as InventoryRow[];
+
+        // Client-side fallback if needed
+        if (
+            categoryFilter !== "__ALL__" &&
+            next.length &&
+            next.some((r) => "category" in r)
+        ) {
+            next = next.filter((r) => (r.category ?? "__NONE__") === categoryFilter);
+        }
+
+        // Build/merge distinct category options from result
+        const discovered = Array.from(
+            new Set(
+                next.map((r) => (r.category || "").trim()).filter(Boolean)
+            )
+        );
+        setCategoryOptions((prev) =>
+            Array.from(new Set([...(prev ?? []), ...discovered])).sort()
+        );
+
+        setRows(next);
     }
 
     useEffect(() => {
         load();
-        // eslint-disable-next-line
-    }, [type, clientId, search]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [type, clientId, search, categoryFilter]);
+
+    // When a new category is created from a modal, add to filter options immediately
+    function handleCategoryCreated(c: string) {
+        const v = c.trim();
+        if (!v) return;
+        setCategoryOptions((prev) =>
+            prev.includes(v) ? prev : [...prev, v].sort()
+        );
+    }
 
     return (
         <div className="max-w-7xl mx-auto p-4 md:p-6 space-y-4">
@@ -92,19 +144,39 @@ export function InventoryTable({
                 <h2 className="text-lg font-semibold">{title}</h2>
 
                 <div className="ml-auto flex items-center gap-2">
-                    {toolbarRight /* client picker goes here (if provided) */}
+                    {toolbarRight}
+
+                    {/* Category filter */}
+                    <label className="text-sm text-gray-700">Category</label>
+                    <select
+                        className="border rounded px-3 py-2 text-sm"
+                        value={categoryFilter}
+                        onChange={(e) => setCategoryFilter(e.target.value)}
+                    >
+                        <option value="__ALL__">All</option>
+                        {categoryOptions.map((c) => (
+                            <option key={c} value={c}>
+                                {c}
+                            </option>
+                        ))}
+                    </select>
+
                     <input
                         placeholder="Search by name…"
-                        className={`border px-3 py-2 rounded w-64 ${searchDisabled ? "bg-gray-100 text-gray-500 cursor-not-allowed" : ""}`}
+                        className={`border px-3 py-2 rounded w-64 ${searchDisabled ? "bg-gray-100 text-gray-500 cursor-not-allowed" : ""
+                            }`}
                         value={search}
                         onChange={(e) => setSearch(e.target.value)}
                         disabled={!!searchDisabled}
                     />
+
                     <NewItemButton
                         defaultType={type}
                         onCreated={load}
                         disabled={!!disableNew}
                         extraValues={type === "client" ? { client_id: clientId ?? null } : {}}
+                        categoryOptions={categoryOptions}
+                        onCategoryCreated={handleCategoryCreated}
                     />
                 </div>
             </div>
@@ -121,6 +193,7 @@ export function InventoryTable({
                                     <th className="p-2 text-right whitespace-nowrap w-32">Reorder Pt</th>
                                 )}
                                 <th className="p-2 text-left whitespace-nowrap w-28">Status</th>
+                                <th className="p-2 text-left whitespace-nowrap w-40">Category</th>
                                 <th className="p-2 text-right whitespace-nowrap w-[260px]">Actions</th>
                             </tr>
                         </thead>
@@ -136,10 +209,16 @@ export function InventoryTable({
                                         </td>
                                     )}
                                     <td className="p-2"><StatusChip status={r.reorder_status} /></td>
+                                    <td className="p-2">{r.category || "—"}</td>
                                     <td className="p-2">
                                         <div className="flex items-center justify-end gap-2">
                                             <MovementMenu item={r} onChange={load} clientId={clientId || undefined} />
-                                            <EditItemButton item={r} onSaved={load} />
+                                            <EditItemButton
+                                                item={r}
+                                                onSaved={load}
+                                                categoryOptions={categoryOptions}
+                                                onCategoryCreated={handleCategoryCreated}
+                                            />
                                             <DeleteItemButton item={r} onDeleted={load} />
                                         </div>
                                     </td>
@@ -168,30 +247,49 @@ function NewItemButton({
     onCreated,
     extraValues = {},
     disabled,
+    // NEW:
+    categoryOptions = [],
+    onCategoryCreated,
 }: {
     defaultType: "raw" | "general" | "client";
     onCreated: () => void;
     extraValues?: Record<string, any>;
     disabled?: boolean;
+    categoryOptions?: string[];
+    onCategoryCreated?: (c: string) => void;
 }) {
     const [open, setOpen] = useState(false);
     const [name, setName] = useState("");
     const [unit, setUnit] = useState("");
     const [reorderPoint, setReorderPoint] = useState(0);
 
+    // typeable category
+    const [category, setCategory] = useState<string>("");
+
     async function save() {
-        const { error } = await supabase.from("inventory_items").insert({
+        const payload = {
             type: defaultType,
             name,
             unit,
             reorder_point: defaultType === "raw" ? reorderPoint : 0,
+            category: category.trim() || null,
             ...extraValues,
-        });
+        };
+
+        const { error } = await supabase.from("inventory_items").insert(payload);
         if (error) return alert(error.message);
+
+        // publish new category immediately
+        const trimmed = category.trim();
+        if (onCategoryCreated && trimmed && !categoryOptions.includes(trimmed)) {
+            onCategoryCreated(trimmed);
+        }
+
         setOpen(false);
         setName("");
         setUnit("");
         setReorderPoint(0);
+        setCategory("");
         onCreated();
     }
 
@@ -218,6 +316,7 @@ function NewItemButton({
                             placeholder="Name"
                             value={name}
                             onChange={(e) => setName(e.target.value)}
+                            required
                         />
                         <div className="flex gap-2">
                             <input
@@ -225,6 +324,7 @@ function NewItemButton({
                                 placeholder="Unit"
                                 value={unit}
                                 onChange={(e) => setUnit(e.target.value)}
+                                required
                             />
                             {defaultType === "raw" && (
                                 <input
@@ -236,6 +336,25 @@ function NewItemButton({
                                 />
                             )}
                         </div>
+
+                        {/* Typeable Category with suggestions */}
+                        <div>
+                            <label className="block text-sm font-medium mb-1">Category</label>
+                            <input
+                                className="w-full border px-3 py-2 rounded"
+                                list="inventory-category-options"
+                                placeholder="Type or select a category…"
+                                value={category}
+                                onChange={(e) => setCategory(e.target.value)}
+                                required
+                            />
+                            <datalist id="inventory-category-options">
+                                {categoryOptions.map((c) => (
+                                    <option key={c} value={c} />
+                                ))}
+                            </datalist>
+                        </div>
+
                         <div className="flex gap-2 justify-end">
                             <button className="px-3 py-2" onClick={() => setOpen(false)}>
                                 Cancel
@@ -417,7 +536,7 @@ function MovementMenu({
     );
 }
 
-/* ---------- Destination picker (flow + client filter) ---------- */
+/* ---------- Destination picker ---------- */
 function TransferPicker({
     sourceType,
     currentItemId,
@@ -486,9 +605,14 @@ function TransferPicker({
 function EditItemButton({
     item,
     onSaved,
+    // NEW:
+    categoryOptions = [],
+    onCategoryCreated,
 }: {
     item: InventoryRow;
     onSaved: () => void;
+    categoryOptions?: string[];
+    onCategoryCreated?: (c: string) => void;
 }) {
     const [open, setOpen] = useState(false);
     const [busy, setBusy] = useState(false);
@@ -499,21 +623,25 @@ function EditItemButton({
         Number(item.reorder_point ?? 0)
     );
 
+    const [category, setCategory] = useState<string>(item.category || "");
+
     useEffect(() => {
         if (open) {
             setName(item.name);
             setUnit(item.unit || "");
             setReorderPoint(Number(item.reorder_point ?? 0));
+            setCategory(item.category || "");
         }
     }, [open, item]);
 
     async function save() {
         if (!name.trim()) return alert("Name is required.");
-
         setBusy(true);
+
         const payload: Record<string, any> = {
             name: name.trim(),
             unit: unit.trim(),
+            category: category.trim() || null,
         };
         if (item.type === "raw") payload.reorder_point = Number(reorderPoint || 0);
 
@@ -524,6 +652,12 @@ function EditItemButton({
 
         setBusy(false);
         if (error) return alert(error.message);
+
+        // publish new category if created here
+        const trimmed = category.trim();
+        if (onCategoryCreated && trimmed && !categoryOptions.includes(trimmed)) {
+            onCategoryCreated(trimmed);
+        }
 
         setOpen(false);
         onSaved();
@@ -567,6 +701,23 @@ function EditItemButton({
                                     onChange={(e) => setReorderPoint(+e.target.value)}
                                 />
                             )}
+                        </div>
+
+                        {/* Typeable Category with suggestions */}
+                        <div>
+                            <label className="block text-sm font-medium mb-1">Category</label>
+                            <input
+                                className="w-full border px-3 py-2 rounded"
+                                list="inventory-category-options" // reuse the same datalist id
+                                placeholder="Type or select a category…"
+                                value={category}
+                                onChange={(e) => setCategory(e.target.value)}
+                            />
+                            <datalist id="inventory-category-options">
+                                {categoryOptions.map((c) => (
+                                    <option key={c} value={c} />
+                                ))}
+                            </datalist>
                         </div>
 
                         <div className="flex gap-2 justify-end">
