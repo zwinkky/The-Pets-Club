@@ -342,7 +342,7 @@ function NewItemButton({
     );
 }
 
-/* ---------- Movements (IN / OUT / TRANSFER with conversion) ---------- */
+/* ---------- Movements (IN / OUT / TRANSFER with conversion) — FIXED ---------- */
 function MovementMenu({
     item,
     onChange,
@@ -381,43 +381,38 @@ function MovementMenu({
             const available = Number(item.qty_on_hand ?? 0);
             if (qty > available) return alert(`Not enough stock to transfer. Available: ${available}`);
 
+            // Produced qty can differ (conversion); default to 1:1 when blank
             const finalProdQty = prodQty === "" ? qty : Number(prodQty);
-            if (!Number.isFinite(finalProdQty) || finalProdQty < 0)
+            if (!Number.isFinite(finalProdQty) || finalProdQty < 0) {
                 return alert("Produced quantity must be a valid number.");
+            }
 
-            if (finalProdQty === qty) {
-                const { error } = await supabase.from("inventory_movements").insert({
-                    item_id: toItem.id,
-                    movement: "transfer",
-                    qty,
-                    note,
-                    from_item_id: item.id,
-                });
-                if (error) return alert(error.message);
-            } else {
-                const outRes = await supabase.from("inventory_movements").insert({
+            // --- Always OUT from sender first ---
+            const outRes = await supabase.from("inventory_movements").insert({
+                item_id: item.id,
+                movement: "out",
+                qty,
+                note: note || `transfer to ${toItem.name}`,
+            });
+            if (outRes.error) return alert(outRes.error.message);
+
+            // --- Then IN to recipient (linking back to sender if column exists) ---
+            const inRes = await supabase.from("inventory_movements").insert({
+                item_id: toItem.id,
+                movement: "in",
+                qty: finalProdQty,
+                note: note || `transfer from ${item.name}`,
+                from_item_id: item.id, // remove if your table doesn't have this column
+            });
+            if (inRes.error) {
+                // rollback sender OUT if recipient IN fails
+                await supabase.from("inventory_movements").insert({
                     item_id: item.id,
-                    movement: "out",
-                    qty,
-                    note: note || `convert to ${toItem.name}`,
-                });
-                if (outRes.error) return alert(outRes.error.message);
-
-                const inRes = await supabase.from("inventory_movements").insert({
-                    item_id: toItem.id,
                     movement: "in",
-                    qty: finalProdQty,
-                    note: note || `from ${item.name}`,
+                    qty,
+                    note: "rollback: failed destination insert",
                 });
-                if (inRes.error) {
-                    await supabase.from("inventory_movements").insert({
-                        item_id: item.id,
-                        movement: "in",
-                        qty,
-                        note: "rollback: failed destination insert",
-                    });
-                    return alert(inRes.error.message);
-                }
+                return alert(inRes.error.message);
             }
         } else {
             const { error } = await supabase.from("inventory_movements").insert({
@@ -438,15 +433,9 @@ function MovementMenu({
 
     return (
         <>
-            <button className={ghostBtn} onClick={() => setOpen("in")}>
-                IN
-            </button>
-            <button className={ghostBtn} onClick={() => setOpen("out")}>
-                OUT
-            </button>
-            <button className={ghostBtn} onClick={() => setOpen("transfer")}>
-                Transfer
-            </button>
+            <button className={ghostBtn} onClick={() => setOpen("in")}>IN</button>
+            <button className={ghostBtn} onClick={() => setOpen("out")}>OUT</button>
+            <button className={ghostBtn} onClick={() => setOpen("transfer")}>Transfer</button>
 
             {!!open && (
                 <div className="fixed inset-0 bg-black/30 flex items-center justify-center p-3">
@@ -479,7 +468,9 @@ function MovementMenu({
                                     type="number"
                                     min={0}
                                     value={prodQty}
-                                    onChange={(e) => setProdQty(e.target.value === "" ? "" : +e.target.value)}
+                                    onChange={(e) =>
+                                        setProdQty(e.target.value === "" ? "" : +e.target.value)
+                                    }
                                     placeholder={`Produced qty${toItem ? ` (${toItem.unit})` : ""}`}
                                     className="w-full border px-3 py-2 rounded"
                                     disabled={!toItem}
@@ -498,7 +489,10 @@ function MovementMenu({
                             <button className="px-3 py-2" onClick={() => setOpen(null)}>
                                 Cancel
                             </button>
-                            <button className="px-3 py-2 bg-black text-white rounded" onClick={() => submit(open!)}>
+                            <button
+                                className="px-3 py-2 bg-black text-white rounded"
+                                onClick={() => submit(open!)}
+                            >
                                 Save
                             </button>
                         </div>
@@ -508,6 +502,7 @@ function MovementMenu({
         </>
     );
 }
+
 
 /* ---------- Destination picker (shows client name) ---------- */
 function TransferPicker({
