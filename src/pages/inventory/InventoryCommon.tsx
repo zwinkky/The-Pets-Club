@@ -65,7 +65,9 @@ export function InventoryTable({
     const [categoryFilter, setCategoryFilter] = useState<string>("__ALL__");
     const [categoryOptions, setCategoryOptions] = useState<string[]>([]); // start empty
 
-    const showReorder = type === "raw";
+    // Reorder column is removed for RAW page (and for others we never showed it anyway)
+    const showReorder = false;
+
     const colCount =
         1 + // name
         1 + // unit
@@ -97,11 +99,7 @@ export function InventoryTable({
         let next = (data ?? []) as InventoryRow[];
 
         // Client-side fallback if needed
-        if (
-            categoryFilter !== "__ALL__" &&
-            next.length &&
-            next.some((r) => "category" in r)
-        ) {
+        if (categoryFilter !== "__ALL__" && next.length && next.some((r) => "category" in r)) {
             next = next.filter((r) => (r.category ?? "__NONE__") === categoryFilter);
         }
 
@@ -109,9 +107,7 @@ export function InventoryTable({
         const discovered = Array.from(
             new Set(next.map((r) => (r.category || "").trim()).filter(Boolean))
         );
-        setCategoryOptions((prev) =>
-            Array.from(new Set([...(prev ?? []), ...discovered])).sort()
-        );
+        setCategoryOptions((prev) => Array.from(new Set([...(prev ?? []), ...discovered])).sort());
 
         setRows(next);
     }
@@ -197,7 +193,9 @@ export function InventoryTable({
                                     {showReorder && (
                                         <td className="p-2 text-right tabular-nums">{fmtNum(r.reorder_point)}</td>
                                     )}
-                                    <td className="p-2"><StatusChip status={r.reorder_status} /></td>
+                                    <td className="p-2">
+                                        <StatusChip status={r.reorder_status} />
+                                    </td>
                                     <td className="p-2">{r.category || "—"}</td>
                                     <td className="p-2">
                                         <div className="flex items-center justify-end gap-2">
@@ -248,7 +246,6 @@ function NewItemButton({
     const [open, setOpen] = useState(false);
     const [name, setName] = useState("");
     const [unit, setUnit] = useState("");
-    const [reorderPoint, setReorderPoint] = useState(0);
 
     // typeable category
     const [category, setCategory] = useState<string>("");
@@ -258,7 +255,7 @@ function NewItemButton({
             type: defaultType,
             name,
             unit,
-            reorder_point: defaultType === "raw" ? reorderPoint : 0,
+            // no reorder_point anymore
             category: category.trim() || null,
             ...extraValues,
         };
@@ -275,7 +272,6 @@ function NewItemButton({
         setOpen(false);
         setName("");
         setUnit("");
-        setReorderPoint(0);
         setCategory("");
         onCreated();
     }
@@ -311,15 +307,6 @@ function NewItemButton({
                                 onChange={(e) => setUnit(e.target.value)}
                                 required
                             />
-                            {defaultType === "raw" && (
-                                <input
-                                    className="w-40 border px-3 py-2 rounded"
-                                    type="number"
-                                    placeholder="Reorder point"
-                                    value={reorderPoint}
-                                    onChange={(e) => setReorderPoint(+e.target.value)}
-                                />
-                            )}
                         </div>
 
                         {/* Typeable Category with suggestions */}
@@ -451,9 +438,15 @@ function MovementMenu({
 
     return (
         <>
-            <button className={ghostBtn} onClick={() => setOpen("in")}>IN</button>
-            <button className={ghostBtn} onClick={() => setOpen("out")}>OUT</button>
-            <button className={ghostBtn} onClick={() => setOpen("transfer")}>Transfer</button>
+            <button className={ghostBtn} onClick={() => setOpen("in")}>
+                IN
+            </button>
+            <button className={ghostBtn} onClick={() => setOpen("out")}>
+                OUT
+            </button>
+            <button className={ghostBtn} onClick={() => setOpen("transfer")}>
+                Transfer
+            </button>
 
             {!!open && (
                 <div className="fixed inset-0 bg-black/30 flex items-center justify-center p-3">
@@ -486,9 +479,7 @@ function MovementMenu({
                                     type="number"
                                     min={0}
                                     value={prodQty}
-                                    onChange={(e) =>
-                                        setProdQty(e.target.value === "" ? "" : +e.target.value)
-                                    }
+                                    onChange={(e) => setProdQty(e.target.value === "" ? "" : +e.target.value)}
                                     placeholder={`Produced qty${toItem ? ` (${toItem.unit})` : ""}`}
                                     className="w-full border px-3 py-2 rounded"
                                     disabled={!toItem}
@@ -507,10 +498,7 @@ function MovementMenu({
                             <button className="px-3 py-2" onClick={() => setOpen(null)}>
                                 Cancel
                             </button>
-                            <button
-                                className="px-3 py-2 bg-black text-white rounded"
-                                onClick={() => submit(open!)}
-                            >
+                            <button className="px-3 py-2 bg-black text-white rounded" onClick={() => submit(open!)}>
                                 Save
                             </button>
                         </div>
@@ -521,7 +509,7 @@ function MovementMenu({
     );
 }
 
-/* ---------- Destination picker ---------- */
+/* ---------- Destination picker (shows client name) ---------- */
 function TransferPicker({
     sourceType,
     currentItemId,
@@ -533,37 +521,80 @@ function TransferPicker({
     limitClientId?: string | null;
     onPick: (
         opt:
-            | { id: string; name: string; type: "raw" | "general" | "client"; unit: string }
+            | {
+                id: string;
+                name: string;
+                type: "raw" | "general" | "client";
+                unit: string;
+                clientName?: string | null;
+            }
             | null
     ) => void;
 }) {
     const [options, setOptions] = useState<
-        { id: string; name: string; type: "raw" | "general" | "client"; unit: string }[]
+        {
+            id: string;
+            name: string;
+            type: "raw" | "general" | "client";
+            unit: string;
+            clientName?: string | null;
+        }[]
     >([]);
     const [val, setVal] = useState("");
 
     useEffect(() => {
         (async () => {
+            // Pull client.name via FK relationship so we can label CLIENT rows properly
             let q = supabase
                 .from("inventory_items")
-                .select("id,name,type,unit,client_id")
+                .select(
+                    `
+          id, name, type, unit, client_id,
+          client:client_id ( id, name )
+        `
+                )
                 .neq("id", currentItemId)
                 .order("type", { ascending: true })
                 .order("name", { ascending: true });
 
+            // Allowed transfer targets by source type
             if (sourceType === "raw") q = q.in("type", ["general"]);
             if (sourceType === "general") q = q.in("type", ["client"]);
             if (sourceType === "client") q = q.in("type", ["general"]);
+
+            // When moving from GENERAL into CLIENT, optionally constrain to a specific client
             if (sourceType === "general" && limitClientId) q = q.eq("client_id", limitClientId);
 
             const { data, error } = await q;
             if (!error) {
-                setOptions(((data ?? []) as any).map((d: any) => ({
-                    id: d.id, name: d.name, type: d.type, unit: d.unit
-                })));
+                setOptions(
+                    ((data ?? []) as any).map((d: any) => ({
+                        id: d.id,
+                        name: d.name,
+                        type: d.type,
+                        unit: d.unit,
+                        clientName: d.client?.name ?? null, // <-- client display name
+                    }))
+                );
             }
         })();
     }, [currentItemId, sourceType, limitClientId]);
+
+    // Helper to format each option label
+    const renderLabel = (o: {
+        name: string;
+        type: "raw" | "general" | "client";
+        unit: string;
+        clientName?: string | null;
+    }) => {
+        const unit = o.unit ? ` (${o.unit})` : "";
+        if (o.type === "client") {
+            const client = o.clientName ?? "Unnamed client";
+            return `CLIENT: ${client} • ${o.name}${unit}`;
+        }
+        if (o.type === "general") return `GENERAL • ${o.name}${unit}`;
+        return `RAW • ${o.name}${unit}`;
+    };
 
     return (
         <select
@@ -579,14 +610,14 @@ function TransferPicker({
             <option value="">Choose destination item</option>
             {options.map((o) => (
                 <option key={o.id} value={o.id}>
-                    {o.type.toUpperCase()} • {o.name} {o.unit ? `(${o.unit})` : ""}
+                    {renderLabel(o)}
                 </option>
             ))}
         </select>
     );
 }
 
-/* ---------- Edit ---------- */
+/* ---------- Edit (updates ON HAND via movement) ---------- */
 function EditItemButton({
     item,
     onSaved,
@@ -604,17 +635,14 @@ function EditItemButton({
 
     const [name, setName] = useState(item.name);
     const [unit, setUnit] = useState(item.unit || "");
-    const [reorderPoint, setReorderPoint] = useState<number>(
-        Number(item.reorder_point ?? 0)
-    );
-
+    const [onHand, setOnHand] = useState<number>(Number(item.qty_on_hand ?? 0)); // <-- edit on hand
     const [category, setCategory] = useState<string>(item.category || "");
 
     useEffect(() => {
         if (open) {
             setName(item.name);
             setUnit(item.unit || "");
-            setReorderPoint(Number(item.reorder_point ?? 0));
+            setOnHand(Number(item.qty_on_hand ?? 0));
             setCategory(item.category || "");
         }
     }, [open, item]);
@@ -623,20 +651,45 @@ function EditItemButton({
         if (!name.trim()) return alert("Name is required.");
         setBusy(true);
 
+        // 1) Update basic item fields (name/unit/category)
         const payload: Record<string, any> = {
             name: name.trim(),
             unit: unit.trim(),
             category: category.trim() || null,
         };
-        if (item.type === "raw") payload.reorder_point = Number(reorderPoint || 0);
 
-        const { error } = await supabase
-            .from("inventory_items")
-            .update(payload)
-            .eq("id", item.id);
+        const upd = await supabase.from("inventory_items").update(payload).eq("id", item.id);
+        if (upd.error) {
+            setBusy(false);
+            return alert(upd.error.message);
+        }
 
-        setBusy(false);
-        if (error) return alert(error.message);
+        // 2) Apply on-hand delta as inventory movement so balances & history stay correct
+        const current = Number(item.qty_on_hand ?? 0);
+        const next = Number(onHand ?? 0);
+        const delta = next - current;
+
+        if (delta !== 0) {
+            const movement = delta > 0 ? "in" : "out";
+            const qty = Math.abs(delta);
+
+            const mov = await supabase.from("inventory_movements").insert({
+                item_id: item.id,
+                movement,
+                qty,
+                note: "manual adjustment from Edit modal",
+            });
+
+            if (mov.error) {
+                // rollback the name/unit/category change for safety
+                await supabase
+                    .from("inventory_items")
+                    .update({ name: item.name, unit: item.unit, category: item.category ?? null })
+                    .eq("id", item.id);
+                setBusy(false);
+                return alert(mov.error.message);
+            }
+        }
 
         // publish new category if created here
         const trimmed = category.trim();
@@ -644,6 +697,7 @@ function EditItemButton({
             onCategoryCreated(trimmed);
         }
 
+        setBusy(false);
         setOpen(false);
         onSaved();
     }
@@ -677,15 +731,14 @@ function EditItemButton({
                                 value={unit}
                                 onChange={(e) => setUnit(e.target.value)}
                             />
-                            {item.type === "raw" && (
-                                <input
-                                    className="w-40 border px-3 py-2 rounded"
-                                    type="number"
-                                    placeholder="Reorder point"
-                                    value={reorderPoint}
-                                    onChange={(e) => setReorderPoint(+e.target.value)}
-                                />
-                            )}
+                            {/* Replaced Reorder Point with On Hand */}
+                            <input
+                                className="w-40 border px-3 py-2 rounded"
+                                type="number"
+                                placeholder="On hand"
+                                value={onHand}
+                                onChange={(e) => setOnHand(+e.target.value)}
+                            />
                         </div>
 
                         {/* Typeable Category with suggestions */}
@@ -709,11 +762,7 @@ function EditItemButton({
                             <button className="px-3 py-2" onClick={() => setOpen(false)} disabled={busy}>
                                 Cancel
                             </button>
-                            <button
-                                className="px-3 py-2 bg-black text-white rounded"
-                                onClick={save}
-                                disabled={busy}
-                            >
+                            <button className="px-3 py-2 bg-black text-white rounded" onClick={save} disabled={busy}>
                                 {busy ? "Saving…" : "Save"}
                             </button>
                         </div>
