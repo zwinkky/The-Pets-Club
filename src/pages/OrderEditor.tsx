@@ -8,7 +8,7 @@ type VariantOption = {
     id: string;
     product_id: string;
     name: string;
-    wholesale_price?: number | null;      // optional (editors won't see)
+    wholesale_price?: number | null;
     retail_price_default: number | null;
 };
 
@@ -17,17 +17,18 @@ type Item = {
     product_name: string;
     variation: string;
     qty: number;
-    wholesale_price?: number; // admin-only
+    wholesale_price?: number;
     retail_price: number;     // base unit price (before discount)
-    discount_pct?: number;    // NEW (0-100); persisted only if column exists
+    discount_pct?: number;    // (0–100)
     product_id?: string;
-    variant_id?: string;
+    variant_id?: string;      // NEW: persisted only if the column exists
 };
 
 const today = () => new Date().toISOString().slice(0, 10);
 
 // helpers
-const clampPct = (n: number | undefined) => Math.max(0, Math.min(100, Number(n || 0)));
+const clampPct = (n: number | undefined) =>
+    Math.max(0, Math.min(100, Number(n || 0)));
 const priceAfterDiscount = (base: number | undefined, pct: number | undefined) => {
     const b = Number(base || 0);
     const p = clampPct(pct);
@@ -49,13 +50,21 @@ export default function OrderEditor({
     const [orderDate, setOrderDate] = useState<string>(today());
     const [shopFees, setShopFees] = useState<number>(0);
     const [items, setItems] = useState<Item[]>([
-        { product_name: "", variation: "", qty: 1, wholesale_price: isAdmin ? 0 : undefined, retail_price: 0, discount_pct: 0 },
+        {
+            product_name: "",
+            variation: "",
+            qty: 1,
+            wholesale_price: isAdmin ? 0 : undefined,
+            retail_price: 0,
+            discount_pct: 0,
+        },
     ]);
     const [saving, setSaving] = useState(false);
     const [loading, setLoading] = useState(true);
 
     const [originalItemIds, setOriginalItemIds] = useState<string[]>([]);
-    const [hasDiscountCol, setHasDiscountCol] = useState<boolean>(false); // NEW
+    const [hasDiscountCol, setHasDiscountCol] = useState<boolean>(false);
+    const [hasVariantCol, setHasVariantCol] = useState<boolean>(false); // NEW
 
     // client-scoped catalog
     const [products, setProducts] = useState<Product[]>([]);
@@ -73,22 +82,37 @@ export default function OrderEditor({
         (async () => {
             setLoading(true);
 
-            // (0) Detect whether the DB has an order_items.discount_pct column
+            // (0) Detect optional columns
             {
-                const probe = await supabase.from("order_items").select("discount_pct").limit(1);
-                setHasDiscountCol(!probe.error); // true if column exists
+                const probeDisc = await supabase
+                    .from("order_items")
+                    .select("discount_pct")
+                    .limit(1);
+                setHasDiscountCol(!probeDisc.error);
+
+                const probeVar = await supabase
+                    .from("order_items")
+                    .select("variant_id")
+                    .limit(1);
+                setHasVariantCol(!probeVar.error);
             }
 
             // 1) Load client-scoped catalog
             let catRows: any[] = [];
             if (isAdmin) {
-                const { data, error } = await supabase.rpc("client_catalog_for_admin", { p_client_id: clientId });
+                const { data, error } = await supabase.rpc("client_catalog_for_admin", {
+                    p_client_id: clientId,
+                });
                 if (error) alert(error.message);
                 catRows = (data || []) as any[];
             } else {
-                const editor = await supabase.rpc("client_catalog_for_editor", { p_client_id: clientId });
+                const editor = await supabase.rpc("client_catalog_for_editor", {
+                    p_client_id: clientId,
+                });
                 if (editor.error) {
-                    const admin = await supabase.rpc("client_catalog_for_admin", { p_client_id: clientId });
+                    const admin = await supabase.rpc("client_catalog_for_admin", {
+                        p_client_id: clientId,
+                    });
                     if (admin.error) alert(admin.error.message);
                     catRows = (admin.data || []) as any[];
                 } else {
@@ -96,7 +120,7 @@ export default function OrderEditor({
                 }
             }
 
-            // Build LOCAL arrays (strings for IDs)
+            // Build LOCAL arrays
             const prodMap = new Map<string, Product>();
             const varList: VariantOption[] = [];
             for (const r of catRows) {
@@ -109,14 +133,15 @@ export default function OrderEditor({
                     id: vid,
                     product_id: pid,
                     name: r.variant_name,
-                    wholesale_price: isAdmin ? (r.wholesale_price ?? null) : null,
+                    wholesale_price: isAdmin ? r.wholesale_price ?? null : null,
                     retail_price_default: r.retail_price ?? null,
                 });
             }
-            const prods = Array.from(prodMap.values()).sort((a, b) => a.name.localeCompare(b.name));
-            const vars = varList;
+            const prods = Array.from(prodMap.values()).sort((a, b) =>
+                a.name.localeCompare(b.name)
+            );
             setProducts(prods);
-            setVariants(vars);
+            setVariants(varList);
 
             // 2) Load order if editing
             if (!orderId) {
@@ -142,25 +167,37 @@ export default function OrderEditor({
             setShopFees(Number(order.shop_fees));
 
             let rows: any[] = [];
+            // Compose select list for order_items
+            const commonCols = [
+                "id",
+                "product_name",
+                "variation",
+                "qty",
+                "retail_price",
+            ];
+            if (hasDiscountCol) commonCols.push("discount_pct");
+            if (hasVariantCol) commonCols.push("variant_id");
+
             if (isAdmin) {
-                const cols = `id,product_name,variation,qty,wholesale_price,retail_price${hasDiscountCol ? ",discount_pct" : ""}`;
+                commonCols.splice(4, 0, "wholesale_price"); // after qty
                 const { data: its, error: e2 } = await supabase
                     .from("order_items")
-                    .select(cols)
+                    .select(commonCols.join(","))
                     .eq("order_id", orderId)
                     .order("id");
                 if (e2) alert(e2.message);
                 rows = its || [];
             } else {
-                // try direct read to include discount_pct; else fall back to RPC
-                const cols = `id,product_name,variation,qty,retail_price${hasDiscountCol ? ",discount_pct" : ""}`;
+                // try direct read
                 const direct = await supabase
                     .from("order_items")
-                    .select(cols)
+                    .select(commonCols.join(","))
                     .eq("order_id", orderId)
                     .order("id");
                 if (direct.error) {
-                    const rpc = await supabase.rpc("order_items_for_editor", { p_order_id: orderId });
+                    const rpc = await supabase.rpc("order_items_for_editor", {
+                        p_order_id: orderId,
+                    });
                     if (rpc.error) {
                         const { data: its, error: e2 } = await supabase
                             .from("order_items")
@@ -183,11 +220,20 @@ export default function OrderEditor({
                 }
             }
 
-            // 3) Reconcile using freshly fetched LOCAL catalog
+            // 3) Reconcile using LOCAL catalog
             const reconciled: Item[] = rows.map((it: any) => {
-                const prod = prods.find((pp) => pp.name === it.product_name) || undefined;
-                const vlist = prod ? vars.filter((vv) => vv.product_id === String(prod.id)) : [];
-                const varMatch = vlist.find((vv) => vv.name === it.variation);
+                const prod =
+                    prods.find((pp) => pp.name === it.product_name) || undefined;
+                const vlist = prod
+                    ? varList.filter((vv) => vv.product_id === String(prod.id))
+                    : [];
+                // Prefer DB variant_id when column exists; else match by name
+                const varIdFromDb =
+                    hasVariantCol && it.variant_id ? String(it.variant_id) : undefined;
+                const varMatch = varIdFromDb
+                    ? vlist.find((vv) => String(vv.id) === varIdFromDb)
+                    : vlist.find((vv) => vv.name === it.variation);
+
                 return {
                     row_id: String(it.id),
                     product_name: it.product_name,
@@ -195,9 +241,9 @@ export default function OrderEditor({
                     qty: Number(it.qty) || 0,
                     wholesale_price: isAdmin ? Number(it.wholesale_price) || 0 : undefined,
                     retail_price: Number(it.retail_price) || 0,
-                    discount_pct: hasDiscountCol ? clampPct(Number(it.discount_pct)) : 0, // persist if available; else reset
+                    discount_pct: hasDiscountCol ? clampPct(Number(it.discount_pct)) : 0,
                     product_id: prod ? String(prod.id) : undefined,
-                    variant_id: varMatch ? String(varMatch.id) : undefined,
+                    variant_id: varMatch ? String(varMatch.id) : varIdFromDb, // keep DB value if present
                 };
             });
 
@@ -210,9 +256,17 @@ export default function OrderEditor({
     const addItem = () =>
         setItems((prev) => [
             ...prev,
-            { product_name: "", variation: "", qty: 1, wholesale_price: isAdmin ? 0 : undefined, retail_price: 0, discount_pct: 0 },
+            {
+                product_name: "",
+                variation: "",
+                qty: 1,
+                wholesale_price: isAdmin ? 0 : undefined,
+                retail_price: 0,
+                discount_pct: 0,
+            },
         ]);
-    const removeItem = (idx: number) => setItems((prev) => prev.filter((_, i) => i !== idx));
+    const removeItem = (idx: number) =>
+        setItems((prev) => prev.filter((_, i) => i !== idx));
     const updateItem = (idx: number, patch: Partial<Item>) =>
         setItems((prev) => prev.map((it, i) => (i === idx ? { ...it, ...patch } : it)));
 
@@ -222,7 +276,12 @@ export default function OrderEditor({
         [items]
     );
     const retailTotal = useMemo(
-        () => items.reduce((s, it) => s + (it.qty || 0) * priceAfterDiscount(it.retail_price, it.discount_pct), 0),
+        () =>
+            items.reduce(
+                (s, it) =>
+                    s + (it.qty || 0) * priceAfterDiscount(it.retail_price, it.discount_pct),
+                0
+            ),
         [items]
     );
     const orderIncome = useMemo(() => retailTotal - (shopFees || 0), [retailTotal, shopFees]);
@@ -257,6 +316,16 @@ export default function OrderEditor({
     const save = async () => {
         setSaving(true);
         try {
+            // Guard: if DB expects variant_id, require it per item
+            if (hasVariantCol) {
+                const missing = items.find((it) => !it.variant_id);
+                if (missing) {
+                    alert("Please select a Variant for every item (database expects variant_id).");
+                    setSaving(false);
+                    return;
+                }
+            }
+
             let id = orderId;
 
             // upsert order header
@@ -289,7 +358,7 @@ export default function OrderEditor({
                 if (error) throw error;
             }
 
-            // updates (persist discounted price; discount_pct if supported)
+            // updates
             const updates = items
                 .filter((it) => it.row_id)
                 .map((it) => {
@@ -301,6 +370,7 @@ export default function OrderEditor({
                     };
                     if (hasDiscountCol) patch.discount_pct = clampPct(it.discount_pct);
                     if (isAdmin) patch.wholesale_price = Number(it.wholesale_price) || 0;
+                    if (hasVariantCol) patch.variant_id = it.variant_id || null; // NEW
                     return supabase.from("order_items").update(patch).eq("id", it.row_id);
                 });
             if (updates.length) {
@@ -318,10 +388,12 @@ export default function OrderEditor({
                         product_name: (it.product_name || "").trim(),
                         variation: (it.variation || "").trim(),
                         qty: Number(it.qty) || 0,
-                        retail_price: Number(priceAfterDiscount(it.retail_price, it.discount_pct)) || 0,
+                        retail_price:
+                            Number(priceAfterDiscount(it.retail_price, it.discount_pct)) || 0,
                     };
                     if (hasDiscountCol) base.discount_pct = clampPct(it.discount_pct);
                     if (isAdmin) base.wholesale_price = Number(it.wholesale_price) || 0;
+                    if (hasVariantCol) base.variant_id = it.variant_id || null; // NEW
                     return base;
                 });
             if (insertsData.length) {
@@ -331,7 +403,16 @@ export default function OrderEditor({
 
             onCancel(clientId);
         } catch (err: any) {
-            alert(err.message || String(err));
+            // Friendlier message for your current DB trigger error
+            const msg = err?.message || String(err);
+            if (msg.includes('record "new" has no field "variant_id"')) {
+                alert(
+                    'Your database trigger references NEW.variant_id but the "order_items" table has no "variant_id" column. ' +
+                    'Add the column or update the trigger to the correct field name.'
+                );
+            } else {
+                alert(msg);
+            }
         } finally {
             setSaving(false);
         }
@@ -341,22 +422,38 @@ export default function OrderEditor({
 
     return (
         <div className="max-w-6xl mx-auto p-6 space-y-4">
-            <button className="underline" onClick={() => onCancel(clientId)}>← Back</button>
+            <button className="underline" onClick={() => onCancel(clientId)}>
+                ← Back
+            </button>
             <h1 className="text-2xl font-bold">{orderId ? "Edit Order" : "New Order"}</h1>
 
             <Card title="Order Info">
                 <div className="grid gap-3 md:grid-cols-3">
                     <div>
                         <label className="text-sm">Order ID</label>
-                        <input className="w-full border rounded-lg p-2" value={orderCode} onChange={(e) => setOrderCode(e.target.value)} />
+                        <input
+                            className="w-full border rounded-lg p-2"
+                            value={orderCode}
+                            onChange={(e) => setOrderCode(e.target.value)}
+                        />
                     </div>
                     <div>
                         <label className="text-sm">Shop Fees</label>
-                        <input className="w-full border rounded-lg p-2" type="number" value={shopFees} onChange={(e) => setShopFees(Number(e.target.value))} />
+                        <input
+                            className="w-full border rounded-lg p-2"
+                            type="number"
+                            value={shopFees}
+                            onChange={(e) => setShopFees(Number(e.target.value))}
+                        />
                     </div>
                     <div>
                         <label className="text-sm">Order Date</label>
-                        <input className="w-full border rounded-lg p-2" type="date" value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
+                        <input
+                            className="w-full border rounded-lg p-2"
+                            type="date"
+                            value={orderDate}
+                            onChange={(e) => setOrderDate(e.target.value)}
+                        />
                     </div>
                 </div>
             </Card>
@@ -406,7 +503,9 @@ export default function OrderEditor({
                                                 onChange={(e) => onSelectVariant(idx, e.target.value)}
                                                 disabled={!it.product_id}
                                             >
-                                                <option value="">{it.product_id ? "Select variant…" : "Pick a product first"}</option>
+                                                <option value="">
+                                                    {it.product_id ? "Select variant…" : "Pick a product first"}
+                                                </option>
                                                 {opts.map((v) => (
                                                     <option key={String(v.id)} value={String(v.id)}>{v.name}</option>
                                                 ))}
@@ -443,7 +542,9 @@ export default function OrderEditor({
                                                 max={100}
                                                 step="0.01"
                                                 value={clampPct(it.discount_pct)}
-                                                onChange={(e) => updateItem(idx, { discount_pct: clampPct(Number(e.target.value)) })}
+                                                onChange={(e) =>
+                                                    updateItem(idx, { discount_pct: clampPct(Number(e.target.value)) })
+                                                }
                                                 placeholder="0"
                                                 title="Discount percentage"
                                             />
@@ -459,15 +560,26 @@ export default function OrderEditor({
                                                     title="Unit price before discount"
                                                 />
                                                 <div className="text-xs text-gray-500 mt-1">
-                                                    after: ₱{fmt(unitAfter)} {discounted && <span className="ml-1 inline-block px-2 py-0.5 rounded bg-yellow-100 text-yellow-700">Discounted</span>}
-                                                    {hasDiscountCol && discounted && <span className="ml-1 text-gray-400">({clampPct(it.discount_pct)}%)</span>}
+                                                    after: ₱{fmt(unitAfter)}{" "}
+                                                    {discounted && (
+                                                        <span className="ml-1 inline-block px-2 py-0.5 rounded bg-yellow-100 text-yellow-700">
+                                                            Discounted
+                                                        </span>
+                                                    )}
+                                                    {hasDiscountCol && discounted && (
+                                                        <span className="ml-1 text-gray-400">
+                                                            ({clampPct(it.discount_pct)}%)
+                                                        </span>
+                                                    )}
                                                 </div>
                                             </div>
                                         </td>
 
                                         <td className="p-2 text-right">₱{fmt(rTotal)}</td>
                                         <td className="p-2 text-right">
-                                            <button className="text-red-600" onClick={() => removeItem(idx)}>Remove</button>
+                                            <button className="text-red-600" onClick={() => removeItem(idx)}>
+                                                Remove
+                                            </button>
                                         </td>
                                     </tr>
                                 );
@@ -481,7 +593,9 @@ export default function OrderEditor({
                 {isAdmin && <SummaryBox label="Wholesale Total" value={wholesaleTotal} />}
                 <SummaryBox label="Retail Total" value={retailTotal} />
                 <SummaryBox label="Order Income (Retail - Fees)" value={orderIncome} />
-                {isAdmin && <SummaryBox label="Client Profit (Income - Wholesale)" value={clientProfit} />}
+                {isAdmin && (
+                    <SummaryBox label="Client Profit (Income - Wholesale)" value={clientProfit} />
+                )}
             </div>
 
             <div className="flex gap-2">
